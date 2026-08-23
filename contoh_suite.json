@@ -1,0 +1,51 @@
+{
+  "app": "JAQA",
+  "version": "1.0",
+  "name": "Contoh Suite SIT",
+  "exported_at": "2026-08-22T21:00:00",
+  "test_cases": [
+    {
+      "id": "contoh001",
+      "no_tc": "TC-001",
+      "deskripsi": "Buka halaman dan pastikan judul terlihat",
+      "aplikasi": "Example",
+      "url": "https://example.com",
+      "username": "",
+      "password": "",
+      "expected_result": "Teks Example Domain tampil",
+      "steps": [
+        {
+          "id": "step001",
+          "type": "goto",
+          "selector": "",
+          "value": "",
+          "url": "https://example.com",
+          "key": "",
+          "checked": null,
+          "tag": "",
+          "label": "https://example.com",
+          "delay_ms": 800,
+          "timestamp": "2026-08-22T21:00:00"
+        }
+      ],
+      "expectations": [
+        {
+          "id": "exp001",
+          "selector": "h1",
+          "kind": "text",
+          "attribute": "",
+          "match": "contains",
+          "expected_value": "Example Domain",
+          "label": "Judul halaman",
+          "after_step": 1,
+          "tag": "h1",
+          "sample_text": "Example Domain"
+        }
+      ],
+      "status": "",
+      "notes": "",
+      "last_run_at": "",
+      "expectation_results": []
+    }
+  ]
+}

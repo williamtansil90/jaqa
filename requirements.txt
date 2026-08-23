@@ -1,0 +1,6 @@
+customtkinter>=5.2.2
+playwright>=1.49.0
+openpyxl>=3.1.5
+reportlab>=4.2.5
+pillow>=10.4.0
+darkdetect>=0.8.0
