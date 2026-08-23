@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import queue
 import sys
 import threading
@@ -10,27 +11,32 @@ from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 
-from app import __full_name__, __version__
+from app import __about__, __full_name__, __version__
 from app.core.browser_setup import chromium_ready, install_chromium
+from app.core.browser_session import BrowserImportSource, fetch_cookies, fetch_storage_state, warnings_text
 from app.core.engine import MAX_RECORDED_DELAY_MS, AutomationEngine, payload_to_expectation
 from app.core.models import Expectation, ExpectationResult, Step, TestCase, TestSuite, format_delay
-from app.core.reporter import export_excel, export_pdf
-from app.core.storage import export_json, import_json, load_session, reports_dir, save_session
-from app.gui.dialogs import ExpectationDialog, StepDialog, TestCaseDialog, ask_yes_no, bind_tree_style
-from app.gui.icon import apply_window_icon
+from app.core.reporter import export_excel, export_pdf, export_tc_excel, import_tc_excel
+from app.core.storage import export_json, import_json, last_config_path, load_session, remember_config_path, reports_dir, save_session
+from app.gui.dialogs import AboutDialog, BrowserImportDialog, ExpectationDialog, StepDialog, TestCaseDialog, ask_yes_no, bind_tree_style
+from app.gui.icon import apply_window_icon, make_check_icons
 from app.gui.theme import PALETTE, apply_theme
 
 COLUMNS = (
+    ("aktif", "Active", 52),
     ("no_tc", "NO. TC", 90),
-    ("deskripsi", "Deskripsi", 220),
-    ("aplikasi", "Aplikasi", 140),
-    ("url", "URL", 220),
+    ("deskripsi", "Description", 200),
+    ("aplikasi", "Aplikasi", 130),
+    ("url", "URL", 200),
     ("username", "Username", 110),
     ("password", "Password", 100),
-    ("expected_result", "Expected Result", 220),
+    ("expected_result", "Ekspetasi", 200),
+    ("expectation", "Expected Result", 200),
     ("status", "Status", 80),
-    ("notes", "Catatan", 240),
+    ("notes", "Notes", 220),
 )
+
+TC_EDITABLE = frozenset({"no_tc", "deskripsi", "aplikasi", "url", "username", "password", "expected_result", "notes"})
 
 
 class MainWindow(ctk.CTk):
@@ -53,15 +59,33 @@ class MainWindow(ctk.CTk):
         self._last_record_ts: float | None = None
         self._step_sel: str | None = None
         self._exp_sel: str | None = None
+        self.config_path: Path | None = None
+        self._checked_ids: set[str] = set()
+        self._checked_step_ids: set[str] = set()
+        self._checked_exp_ids: set[str] = set()
+        self._drag_iid: str | None = None
+        self._drag_y = 0
+        self._dragging = False
+        self._tc_context_menu: tk.Menu | None = None
+        self._cell_edit: dict | None = None
+        self._step_context_menu: tk.Menu | None = None
+        self._step_clipboard: list[Step] = []
+        self._step_drag_iid: str | None = None
+        self._step_drag_y = 0
+        self._step_dragging = False
+        self._exp_context_menu: tk.Menu | None = None
+        self._exp_clipboard: list[Expectation] = []
 
         self._build()
         self._refresh_table()
         self._set_status("Siap. Tambah test case, lalu rekam langkah pengguna.")
+        self._sync_title()
         self.after(200, self._pump_events)
         self.after(400, self._ensure_browser)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build(self) -> None:
+        self._build_menubar()
         header = ctk.CTkFrame(self, fg_color=PALETTE["surface"], corner_radius=0, height=72)
         header.pack(fill="x")
         header.pack_propagate(False)
@@ -76,45 +100,44 @@ class MainWindow(ctk.CTk):
         toolbar = ctk.CTkFrame(self, fg_color=PALETTE["surface_alt"], corner_radius=0)
         toolbar.pack(fill="x")
         groups = [
-            ("Test Case", [
-                ("Tambah TC", self.add_case, PALETTE["accent"]),
-                ("Ubah", self.edit_case, PALETTE["surface"]),
-                ("Hapus", self.delete_case, PALETTE["surface"]),
+            ("left", "Test Case", [
+                ("Add TC", self.add_case, PALETTE["accent"]),
+                ("Edit TC", self.edit_case, PALETTE["surface"]),
+                ("Delete TC", self.delete_case, PALETTE["surface"]),
             ]),
-            ("Rekam", [
-                ("RECORD", self.toggle_record, "#B91C1C"),
-                ("Expected Element", self.toggle_expect, "#C2410C"),
-            ]),
-            ("Jalankan", [
-                ("Run Baris Ini", self.run_selected, PALETTE["accent"]),
-                ("Run Sampai Baris Ini", self.run_until, PALETTE["accent"]),
+            ("left", "Jalankan", [
+                ("Single Run", self.run_selected, PALETTE["accent"]),
+                ("Run Until", self.run_until, PALETTE["accent"]),
                 ("Run All", self.run_all, PALETTE["accent"]),
+            ]),
+            ("right", "STATUS", [
+                ("ENABLE", self.enable_selected, PALETTE["ok"]),
+                ("DISABLE", self.disable_selected, "#475569"),
+            ]),
+            ("right", "Rekam", [
+                ("RECORD", self.toggle_record, "#B91C1C"),
+                ("EXPECTED RESULT", self.toggle_expect, "#C2410C"),
                 ("Stop", self.stop_engine, PALETTE["surface"]),
             ]),
-            ("Berkas", [
-                ("Impor JSON", self.import_json, PALETTE["surface"]),
-                ("Ekspor JSON", self.export_json_file, PALETTE["surface"]),
-                ("Ekspor Excel", self.export_excel_file, PALETTE["surface"]),
-                ("Ekspor PDF", self.export_pdf_file, PALETTE["surface"]),
-            ]),
         ]
-        for title, buttons in groups:
+        for side, title, buttons in groups:
             box = ctk.CTkFrame(toolbar, fg_color="transparent")
-            box.pack(side="left", padx=10, pady=8)
+            box.pack(side=side, padx=10, pady=8)
             ctk.CTkLabel(box, text=title.upper(), font=ctk.CTkFont(size=10, weight="bold"), text_color=PALETTE["muted"]).pack(anchor="w")
             row = ctk.CTkFrame(box, fg_color="transparent")
             row.pack(anchor="w")
             for text, cmd, color in buttons:
                 hover = PALETTE["accent_hover"] if color == PALETTE["accent"] else PALETTE["border"]
+                width = 150 if text == "EXPECTED RESULT" else 100 if text == "RECORD" else 130
                 ctk.CTkButton(
                     row,
                     text=text,
                     command=cmd,
                     fg_color=color,
                     hover_color=hover,
-                    width=130 if text != "RECORD" else 100,
+                    width=width,
                     height=30,
-                    font=ctk.CTkFont(size=12, weight="bold" if text in {"RECORD", "Run All"} else "normal"),
+                    font=ctk.CTkFont(size=12, weight="bold" if text in {"RECORD", "Run All", "EXPECTED RESULT"} else "normal"),
                 ).pack(side="left", padx=(0, 6))
 
         body = ctk.CTkFrame(self, fg_color="transparent")
@@ -125,11 +148,31 @@ class MainWindow(ctk.CTk):
         inner = tk.Frame(table_wrap, bg=PALETTE["surface"])
         inner.pack(fill="both", expand=True, padx=8, pady=8)
 
-        self.tree = ttk.Treeview(inner, columns=[c[0] for c in COLUMNS], show="headings", selectmode="browse")
+        self.check_off, self.check_on = make_check_icons()
+        self.tree = ttk.Treeview(inner, columns=[c[0] for c in COLUMNS], show="tree headings", selectmode="extended")
         bind_tree_style(self.tree)
+        style = ttk.Style(self.tree)
+        style.layout(
+            "JAQA.Treeview.Item",
+            [
+                (
+                    "Treeitem.padding",
+                    {
+                        "sticky": "nswe",
+                        "children": [
+                            ("Treeitem.image", {"side": "left", "sticky": ""}),
+                            ("Treeitem.text", {"side": "left", "sticky": ""}),
+                        ],
+                    },
+                )
+            ],
+        )
+        self.tree.heading("#0", text="☐", command=self._toggle_check_all)
+        self.tree.column("#0", width=40, minwidth=36, stretch=False, anchor="center")
         for key, title, width in COLUMNS:
             self.tree.heading(key, text=title)
-            self.tree.column(key, width=width, minwidth=70, stretch=True)
+            stretch = key != "aktif"
+            self.tree.column(key, width=width, minwidth=48 if key == "aktif" else 70, stretch=stretch, anchor="center" if key == "aktif" else "w")
         yscroll = ttk.Scrollbar(inner, orient="vertical", command=self.tree.yview)
         xscroll = ttk.Scrollbar(inner, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
@@ -139,7 +182,13 @@ class MainWindow(ctk.CTk):
         inner.grid_rowconfigure(0, weight=1)
         inner.grid_columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._on_select())
-        self.tree.bind("<Double-1>", lambda _e: self.edit_case())
+        self.tree.bind("<Button-1>", self._on_tree_click, add="+")
+        self.tree.bind("<ButtonPress-1>", self._on_tc_drag_start, add="+")
+        self.tree.bind("<B1-Motion>", self._on_tc_drag_motion, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._on_tc_drag_drop, add="+")
+        self.tree.bind("<Double-1>", self._on_tree_double)
+        self.tree.bind("<Button-3>", self._on_tc_context_menu)
+        self._build_tc_context_menu()
 
         detail = ctk.CTkTabview(body, fg_color=PALETTE["surface"], segmented_button_selected_color=PALETTE["accent"], height=300)
         detail.pack(fill="x", pady=(10, 0))
@@ -147,19 +196,31 @@ class MainWindow(ctk.CTk):
         self.tab_exp = detail.add("Expected Result")
         self.tab_run = detail.add("Hasil Run")
 
-        self.steps_tree = self._make_list_tree(
+        self.steps_tree, steps_wrap = self._make_list_tree(
             self.tab_steps,
             (
                 ("no", "#", 44),
                 ("tipe", "Tipe", 110),
-                ("ket", "Keterangan", 280),
+                ("ket", "Keterangan", 260),
                 ("delay", "Jeda", 90),
-                ("selector", "Selector", 180),
-                ("nilai", "Nilai", 140),
+                ("selector", "Selector", 170),
+                ("nilai", "Nilai", 130),
             ),
             self._on_step_select,
             self.edit_step,
+            "_checked_step_ids",
+            selectmode="extended",
         )
+        self.steps_tree.unbind("<Double-1>")
+        self.steps_tree.bind("<ButtonPress-1>", self._on_step_drag_start, add="+")
+        self.steps_tree.bind("<B1-Motion>", self._on_step_drag_motion, add="+")
+        self.steps_tree.bind("<ButtonRelease-1>", self._on_step_drag_drop, add="+")
+        self.steps_tree.bind("<Double-1>", self._on_step_double)
+        self.steps_tree.bind("<Button-3>", self._on_step_context_menu)
+        steps_wrap.bind("<Button-3>", self._on_step_context_menu)
+        self.tab_steps.bind("<Button-3>", self._on_step_context_menu)
+        self._bind_step_clipboard_keys()
+        self._build_step_context_menu()
         step_btns = (
             ("Ubah Langkah", self.edit_step),
             ("Tambah Delay", self.add_delay_step),
@@ -169,19 +230,29 @@ class MainWindow(ctk.CTk):
         )
         self._pack_list_buttons(self.tab_steps, step_btns)
 
-        self.exp_tree = self._make_list_tree(
+        self.exp_tree, exp_wrap = self._make_list_tree(
             self.tab_exp,
             (
                 ("no", "#", 44),
-                ("label", "Label", 180),
-                ("kind", "Jenis", 110),
-                ("match", "Banding", 110),
-                ("nilai", "Nilai expected", 200),
-                ("after", "Periksa setelah", 130),
+                ("label", "Label", 170),
+                ("kind", "Jenis", 100),
+                ("match", "Banding", 100),
+                ("nilai", "Nilai expected", 180),
+                ("after", "Periksa setelah", 120),
             ),
             self._on_exp_select,
             self.edit_expectation,
+            "_checked_exp_ids",
+            selectmode="extended",
         )
+        self.exp_tree.unbind("<Double-1>")
+        self.exp_tree.configure(selectmode="extended")
+        self.exp_tree.bind("<Double-1>", self._on_exp_double)
+        self.exp_tree.bind("<Button-3>", self._on_exp_context_menu)
+        exp_wrap.bind("<Button-3>", self._on_exp_context_menu)
+        self.tab_exp.bind("<Button-3>", self._on_exp_context_menu)
+        self._bind_exp_clipboard_keys()
+        self._build_exp_context_menu()
         exp_btns = (
             ("Tambah Expected", self.add_expectation),
             ("Ubah", self.edit_expectation),
@@ -200,21 +271,341 @@ class MainWindow(ctk.CTk):
         self.status_var = tk.StringVar(value="")
         ctk.CTkLabel(status, textvariable=self.status_var, anchor="w", text_color=PALETTE["muted"]).pack(fill="x", padx=16)
 
-    def _make_list_tree(self, parent, columns, on_select, on_double) -> ttk.Treeview:
+    def _menu_style(self) -> dict:
+        return {
+            "tearoff": 0,
+            "bg": PALETTE["surface"],
+            "fg": PALETTE["text"],
+            "activebackground": PALETTE["accent"],
+            "activeforeground": "white",
+            "bd": 0,
+            "relief": "flat",
+        }
+
+    def _build_menubar(self) -> None:
+        menubar = tk.Menu(self, **self._menu_style())
+        file_menu = tk.Menu(menubar, **self._menu_style())
+        file_menu.add_command(label="New", command=self.new_config, accelerator="Ctrl+N")
+        file_menu.add_separator()
+        file_menu.add_command(label="Open Config File (JSON)", command=self.open_config, accelerator="Ctrl+O")
+        file_menu.add_command(label="Save Config File (JSON)", command=self.save_config, accelerator="Ctrl+S")
+        file_menu.add_command(label="Save As Config File (JSON)", command=self.save_as_config, accelerator="Ctrl+Shift+S")
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        import_menu = tk.Menu(menubar, **self._menu_style())
+        import_menu.add_command(label="TC File (Excel)", command=self.import_tc_file)
+        menubar.add_cascade(label="Import", menu=import_menu)
+
+        export_menu = tk.Menu(menubar, **self._menu_style())
+        export_menu.add_command(label="TC File as Excel", command=self.export_tc_file)
+        export_menu.add_command(label="TC Result as Excel", command=self.export_result_excel)
+        export_menu.add_command(label="TC Result as Pdf", command=self.export_result_pdf)
+        menubar.add_cascade(label="Export", menu=export_menu)
+
+        toolbox_menu = tk.Menu(menubar, **self._menu_style())
+        toolbox_menu.add_command(label="Copy Cookies from Existing Browser", command=self.copy_cookies_from_browser)
+        toolbox_menu.add_command(label="Copy Session from Existing Browser", command=self.copy_session_from_browser)
+        menubar.add_cascade(label="Toolbox", menu=toolbox_menu)
+
+        about_menu = tk.Menu(menubar, **self._menu_style())
+        about_menu.add_command(label=__about__, command=self.show_about)
+        menubar.add_cascade(label="About", menu=about_menu)
+
+        self.configure(menu=menubar)
+        self.bind_all("<Control-n>", lambda _e: self.new_config())
+        self.bind_all("<Control-o>", lambda _e: self.open_config())
+        self.bind_all("<Control-s>", lambda _e: self.save_config())
+        self.bind_all("<Control-S>", lambda _e: self.save_as_config())
+
+    def _bind_step_clipboard_keys(self) -> None:
+        for widget in (self.steps_tree, self.tab_steps):
+            widget.bind("<Control-c>", self._on_step_copy_key)
+            widget.bind("<Control-v>", self._on_step_paste_key)
+
+    def _on_step_copy_key(self, event) -> str:
+        self.copy_steps()
+        return "break"
+
+    def _on_step_paste_key(self, event) -> str:
+        self.paste_steps()
+        return "break"
+
+    def _sync_step_clipboard_out(self) -> None:
+        if not self._step_clipboard:
+            return
+        payload = json.dumps({"jaqa_steps": [step.to_dict() for step in self._step_clipboard]})
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(payload)
+            self.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _load_step_clipboard(self) -> bool:
+        if self._step_clipboard:
+            return True
+        try:
+            raw = self.clipboard_get()
+            data = json.loads(raw)
+            items = data.get("jaqa_steps") if isinstance(data, dict) else None
+            if items:
+                self._step_clipboard = [Step.from_dict(item) for item in items]
+        except (tk.TclError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+        return bool(self._step_clipboard)
+
+    def _step_paste_index(self, case: TestCase) -> int:
+        sel = list(self.steps_tree.selection())
+        if sel:
+            iid = sel[-1]
+            for index, step in enumerate(case.steps):
+                if step.id == iid:
+                    return index + 1
+        if self._step_sel:
+            for index, step in enumerate(case.steps):
+                if step.id == self._step_sel:
+                    return index + 1
+        return len(case.steps)
+
+    def _update_step_context_menu(self) -> None:
+        if not self._step_context_menu:
+            return
+        can_edit = not self.engine.busy
+        has_clipboard = self._load_step_clipboard()
+        has_steps = bool(self._target_steps())
+        copy_state = "normal" if has_steps and can_edit else "disabled"
+        paste_state = "normal" if has_clipboard and can_edit else "disabled"
+        delete_state = "normal" if has_steps and can_edit else "disabled"
+        self._step_context_menu.entryconfig(0, state=copy_state)
+        self._step_context_menu.entryconfig(1, state=paste_state)
+        self._step_context_menu.entryconfig(3, state=delete_state)
+
+    def _build_step_context_menu(self) -> None:
+        menu = tk.Menu(self, **self._menu_style())
+        menu.add_command(label="Copy", command=self.copy_steps)
+        menu.add_command(label="Paste", command=self.paste_steps)
+        menu.add_separator()
+        menu.add_command(label="Delete", command=self.delete_step)
+        self._step_context_menu = menu
+
+    def _bind_exp_clipboard_keys(self) -> None:
+        for widget in (self.exp_tree, self.tab_exp):
+            widget.bind("<Control-c>", self._on_exp_copy_key)
+            widget.bind("<Control-v>", self._on_exp_paste_key)
+
+    def _on_exp_copy_key(self, event) -> str:
+        self.copy_expectations()
+        return "break"
+
+    def _on_exp_paste_key(self, event) -> str:
+        self.paste_expectations()
+        return "break"
+
+    def _sync_exp_clipboard_out(self) -> None:
+        if not self._exp_clipboard:
+            return
+        payload = json.dumps({"jaqa_expectations": [item.to_dict() for item in self._exp_clipboard]})
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(payload)
+            self.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _load_exp_clipboard(self) -> bool:
+        if self._exp_clipboard:
+            return True
+        try:
+            raw = self.clipboard_get()
+            data = json.loads(raw)
+            items = data.get("jaqa_expectations") if isinstance(data, dict) else None
+            if items:
+                self._exp_clipboard = [Expectation.from_dict(item) for item in items]
+        except (tk.TclError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+        return bool(self._exp_clipboard)
+
+    def _exp_paste_index(self, case: TestCase) -> int:
+        sel = list(self.exp_tree.selection())
+        if sel:
+            iid = sel[-1]
+            for index, item in enumerate(case.expectations):
+                if item.id == iid:
+                    return index + 1
+        if self._exp_sel:
+            for index, item in enumerate(case.expectations):
+                if item.id == self._exp_sel:
+                    return index + 1
+        return len(case.expectations)
+
+    def _update_exp_context_menu(self) -> None:
+        if not self._exp_context_menu:
+            return
+        can_edit = not self.engine.busy
+        has_clipboard = self._load_exp_clipboard()
+        has_items = bool(self._target_expectations())
+        copy_state = "normal" if has_items and can_edit else "disabled"
+        paste_state = "normal" if has_clipboard and can_edit else "disabled"
+        delete_state = "normal" if has_items and can_edit else "disabled"
+        self._exp_context_menu.entryconfig(0, state=copy_state)
+        self._exp_context_menu.entryconfig(1, state=paste_state)
+        self._exp_context_menu.entryconfig(3, state=delete_state)
+
+    def _build_exp_context_menu(self) -> None:
+        menu = tk.Menu(self, **self._menu_style())
+        menu.add_command(label="Copy", command=self.copy_expectations)
+        menu.add_command(label="Paste", command=self.paste_expectations)
+        menu.add_separator()
+        menu.add_command(label="Delete", command=self.delete_expectation)
+        self._exp_context_menu = menu
+
+    def _on_exp_double(self, event) -> str | None:
+        if event.widget.identify_column(event.x) == "#1":
+            return "break"
+        self.edit_expectation()
+        return None
+
+    def _on_exp_context_menu(self, event) -> str:
+        if not self._exp_context_menu or not self._selected_case():
+            return "break"
+        tree = self.exp_tree
+        if event.widget is tree:
+            region = tree.identify_region(event.x, event.y)
+            if region in {"heading", "separator"}:
+                return "break"
+            iid = tree.identify_row(event.y)
+        else:
+            iid = ""
+        if iid:
+            current = set(tree.selection())
+            if iid not in current:
+                tree.selection_set(iid)
+            self._exp_sel = iid
+        else:
+            sel = tree.selection()
+            self._exp_sel = sel[-1] if sel else None
+        tree.focus_set()
+        self._update_exp_context_menu()
+        x_root, y_root = int(event.x_root), int(event.y_root)
+        self.after(0, lambda: self._show_exp_context_menu(x_root, y_root))
+        return "break"
+
+    def _show_exp_context_menu(self, x_root: int, y_root: int) -> None:
+        if not self._exp_context_menu:
+            return
+        try:
+            self._exp_context_menu.tk_popup(x_root, y_root)
+        finally:
+            self._exp_context_menu.grab_release()
+
+    def copy_expectations(self) -> None:
+        if not self._can_edit_lists():
+            return
+        targets = sorted(self._target_expectations(), key=lambda item: item[1])
+        if not targets:
+            messagebox.showinfo("JAQA", "Pilih expected result yang akan disalin.")
+            return
+        self._exp_clipboard = [item.duplicate() for _case, _index, item in targets]
+        self._sync_exp_clipboard_out()
+        label = self._exp_clipboard[0].summary() if len(self._exp_clipboard) == 1 else f"{len(self._exp_clipboard)} expected"
+        self._set_status(f"Disalin: {label}")
+
+    def paste_expectations(self) -> None:
+        if self.engine.busy:
+            messagebox.showinfo("JAQA", "Selesaikan rekaman/run terlebih dahulu.")
+            return
+        case = self._selected_case()
+        if not case:
+            messagebox.showinfo("JAQA", "Pilih test case terlebih dahulu.")
+            return
+        if not self._load_exp_clipboard():
+            messagebox.showinfo("JAQA", "Tidak ada expected result di clipboard. Gunakan Copy terlebih dahulu.")
+            return
+        insert_at = self._exp_paste_index(case)
+        clones: list[Expectation] = []
+        for i, template in enumerate(self._exp_clipboard):
+            clone = template.duplicate()
+            if not clone.after_step:
+                clone.after_step = len(case.steps)
+            case.expectations.insert(insert_at + i, clone)
+            clones.append(clone)
+        self._exp_sel = clones[-1].id
+        self._refresh_table()
+        self.exp_tree.selection_set(*[clone.id for clone in clones])
+        label = clones[0].summary() if len(clones) == 1 else f"{len(clones)} expected"
+        self._set_status(f"Ditempel: {label}")
+
+    def _build_tc_context_menu(self) -> None:
+        menu = tk.Menu(self, **self._menu_style())
+        menu.add_command(label="Duplicate TC", command=lambda: self.duplicate_case(with_steps=False))
+        menu.add_command(label="Duplicate TC + Step", command=lambda: self.duplicate_case(with_steps=True))
+        self._tc_context_menu = menu
+
+    def _sync_title(self) -> None:
+        name = self.config_path.name if self.config_path else "untitled.json"
+        self.title(f"{__full_name__}  •  v{__version__}  —  {name}")
+
+    def _make_list_tree(self, parent, columns, on_select, on_double, check_attr: str, selectmode: str = "browse") -> ttk.Treeview:
+        columns = (("sel", "☐", 40),) + tuple(columns)
         wrap = tk.Frame(parent, bg=PALETTE["surface"])
         wrap.pack(side="left", fill="both", expand=True, padx=6, pady=6)
-        tree = ttk.Treeview(wrap, columns=[c[0] for c in columns], show="headings", selectmode="browse")
+        tree = ttk.Treeview(wrap, columns=[c[0] for c in columns], show="headings", selectmode=selectmode)
         bind_tree_style(tree)
         for key, title, width in columns:
             tree.heading(key, text=title)
-            tree.column(key, width=width, minwidth=40, stretch=True)
+            tree.column(key, width=width, minwidth=36 if key == "sel" else 40, stretch=key != "sel", anchor="center" if key in {"sel", "no"} else "w")
+        tree.heading("sel", command=lambda: self._toggle_list_check_all(tree, check_attr))
         yscroll = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=yscroll.set)
         tree.pack(side="left", fill="both", expand=True)
         yscroll.pack(side="right", fill="y")
         tree.bind("<<TreeviewSelect>>", lambda _e: on_select())
-        tree.bind("<Double-1>", lambda _e: on_double())
-        return tree
+        tree.bind("<Button-1>", lambda event: self._on_list_click(event, tree, check_attr, on_select), add="+")
+        tree.bind("<Double-1>", lambda event: self._on_list_double(event, on_double))
+        return tree, wrap
+
+    def _checked_set(self, check_attr: str) -> set[str]:
+        return getattr(self, check_attr)
+
+    def _on_list_click(self, event, tree: ttk.Treeview, check_attr: str, on_select) -> str | None:
+        if tree.identify_region(event.x, event.y) != "cell":
+            return None
+        if tree.identify_column(event.x) != "#1":
+            return None
+        row = tree.identify_row(event.y)
+        if not row:
+            return None
+        checked = self._checked_set(check_attr)
+        if row in checked:
+            checked.discard(row)
+        else:
+            checked.add(row)
+        values = list(tree.item(row, "values"))
+        if values:
+            values[0] = "☑" if row in checked else "☐"
+            tree.item(row, values=values)
+        if event.state & 0x0005:
+            on_select()
+            return "break"
+        tree.selection_set(row)
+        on_select()
+        return "break"
+
+    def _on_list_double(self, event, on_double) -> str | None:
+        if event.widget.identify_column(event.x) == "#1":
+            return "break"
+        on_double()
+        return None
+
+    def _toggle_list_check_all(self, tree: ttk.Treeview, check_attr: str) -> None:
+        ids = list(tree.get_children())
+        checked = self._checked_set(check_attr)
+        if ids and all(item_id in checked for item_id in ids):
+            for item_id in ids:
+                checked.discard(item_id)
+        else:
+            checked.update(ids)
+        self._refresh_details()
 
     def _pack_list_buttons(self, parent, items: tuple) -> None:
         box = ctk.CTkFrame(parent, fg_color="transparent", width=150)
@@ -226,42 +617,58 @@ class MainWindow(ctk.CTk):
         self.status_var.set(text)
 
     def _selected_case(self) -> TestCase | None:
-        item = self._selected_iid()
-        if not item:
-            return None
-        return next((tc for tc in self.suite.test_cases if tc.id == item), None)
+        if self._selected_id:
+            hit = next((tc for tc in self.suite.test_cases if tc.id == self._selected_id), None)
+            if hit:
+                return hit
+        cases = self._selected_cases()
+        return cases[0] if cases else None
+
+    def _selected_cases(self) -> list[TestCase]:
+        by_id = {tc.id: tc for tc in self.suite.test_cases}
+        ids = self._selected_iids()
+        return [by_id[iid] for iid in ids if iid in by_id]
+
+    def _selected_iids(self) -> list[str]:
+        sel = self.tree.selection()
+        if sel:
+            return list(sel)
+        return [self._selected_id] if self._selected_id else []
 
     def _selected_iid(self) -> str | None:
-        sel = self.tree.selection()
-        return sel[0] if sel else self._selected_id
+        ids = self._selected_iids()
+        return ids[-1] if ids else None
 
     def _on_select(self) -> None:
         sel = self.tree.selection()
         if sel:
-            self._selected_id = sel[0]
+            self._selected_id = sel[-1]
         self._refresh_details()
 
     def _case_values(self, case: TestCase) -> tuple[str, ...]:
         masked = "•" * min(len(case.password), 10) if case.password else ""
-        expected = case.expected_result
+        expectation = ""
         if case.expectations:
-            extra = "; ".join(item.summary() for item in case.expectations[:3])
-            expected = (expected + " | " if expected else "") + extra
+            expectation = "; ".join(item.summary() for item in case.expectations[:3])
             if len(case.expectations) > 3:
-                expected += f" (+{len(case.expectations) - 3})"
+                expectation += f" (+{len(case.expectations) - 3})"
         return (
+            "🟢" if case.enabled else "⚪",
             case.no_tc,
             case.deskripsi,
             case.aplikasi,
             case.url,
             case.username,
             masked,
-            expected,
+            case.expected_result,
+            expectation or "—",
             case.status or "—",
             case.notes,
         )
 
     def _tag_for(self, case: TestCase, index: int) -> str:
+        if not case.enabled:
+            return "disabled"
         if case.status == "RUNNING":
             return "run"
         if case.status == "OK":
@@ -270,14 +677,391 @@ class MainWindow(ctk.CTk):
             return "nok"
         return "odd" if index % 2 else "even"
 
+    def _on_tree_click(self, event) -> str | None:
+        region = self.tree.identify_region(event.x, event.y)
+        if region not in {"cell", "tree"}:
+            return None
+        if self.tree.identify_column(event.x) != "#0":
+            return None
+        row = self.tree.identify_row(event.y)
+        if not row:
+            return None
+        self._toggle_check(row)
+        self.tree.selection_set(row)
+        self._selected_id = row
+        self._refresh_details()
+        return "break"
+
+    def _on_tree_double(self, event) -> str | None:
+        if self.tree.identify_column(event.x) == "#0":
+            return "break"
+        if self._dragging:
+            return "break"
+        if self.engine.busy or self.recording:
+            return "break"
+        region = self.tree.identify_region(event.x, event.y)
+        if region not in {"cell", "tree"}:
+            return None
+        row = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)
+        if not row or not col:
+            return None
+        key = self._tc_column_key(col)
+        if not key:
+            return "break"
+        if key == "aktif":
+            self._toggle_case_enabled(row)
+            return "break"
+        if key not in TC_EDITABLE:
+            return "break"
+        self.tree.selection_set(row)
+        self._selected_id = row
+        self._start_tc_cell_edit(row, col, key)
+        return "break"
+
+    def _tc_column_key(self, col_id: str) -> str | None:
+        try:
+            index = int(col_id.lstrip("#")) - 1
+        except ValueError:
+            return None
+        keys = [key for key, _title, _width in COLUMNS]
+        if 0 <= index < len(keys):
+            return keys[index]
+        return None
+
+    def _toggle_case_enabled(self, case_id: str) -> None:
+        case = next((item for item in self.suite.test_cases if item.id == case_id), None)
+        if not case:
+            return
+        case.enabled = not case.enabled
+        self._refresh_table()
+        state = "ENABLE" if case.enabled else "DISABLE"
+        self._set_status(f"{case.no_tc} → {state}")
+
+    def _start_tc_cell_edit(self, row: str, col: str, key: str) -> None:
+        self._finish_cell_edit(save=False)
+        case = next((item for item in self.suite.test_cases if item.id == row), None)
+        if not case:
+            return
+        bbox = self.tree.bbox(row, col)
+        if not bbox:
+            return
+        x, y, width, height = bbox
+        value = getattr(case, key, "")
+        entry = tk.Entry(self.tree, borderwidth=0, highlightthickness=1)
+        entry.insert(0, str(value or ""))
+        entry.select_range(0, "end")
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.focus_set()
+        self._cell_edit = {"entry": entry, "case_id": row, "key": key}
+        entry.bind("<Return>", lambda _e: self._finish_cell_edit(save=True))
+        entry.bind("<Escape>", lambda _e: self._finish_cell_edit(save=False))
+        entry.bind("<FocusOut>", lambda _e: self._finish_cell_edit(save=True))
+
+    def _finish_cell_edit(self, save: bool) -> None:
+        if not self._cell_edit:
+            return
+        info = self._cell_edit
+        self._cell_edit = None
+        entry = info["entry"]
+        new_value = entry.get().strip()
+        entry.destroy()
+        if not save:
+            return
+        case = next((item for item in self.suite.test_cases if item.id == info["case_id"]), None)
+        if not case:
+            return
+        key = info["key"]
+        if key in {"no_tc", "url"} and not new_value:
+            return
+        setattr(case, key, new_value)
+        self._refresh_table()
+        self._set_status(f"{case.no_tc}: {key.replace('_', ' ')} diubah.")
+
+    def _on_tc_drag_start(self, event) -> None:
+        if self.engine.busy or self.recording:
+            return
+        if event.state & 0x0005:
+            self._drag_iid = None
+            return
+        if self.tree.identify_column(event.x) == "#0":
+            return
+        region = self.tree.identify_region(event.x, event.y)
+        if region not in {"cell", "tree"}:
+            return
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self._drag_iid = iid
+        self._drag_y = event.y
+        self._dragging = False
+
+    def _on_tc_drag_motion(self, event) -> None:
+        if not self._drag_iid:
+            return
+        if abs(event.y - self._drag_y) > 8:
+            self._dragging = True
+
+    def _on_tc_drag_drop(self, event) -> None:
+        if not self._drag_iid or not self._dragging:
+            self._drag_iid = None
+            self._dragging = False
+            return
+        target = self.tree.identify_row(event.y)
+        if target and target != self._drag_iid:
+            self._reorder_tc(self._drag_iid, target)
+        self._drag_iid = None
+        self._dragging = False
+
+    def _reorder_tc(self, source_id: str, target_id: str) -> None:
+        if self.engine.busy or self.recording:
+            return
+        src_idx = self.suite.index_of(source_id)
+        tgt_idx = self.suite.index_of(target_id)
+        if src_idx < 0 or tgt_idx < 0 or src_idx == tgt_idx:
+            return
+        case = self.suite.test_cases.pop(src_idx)
+        self.suite.test_cases.insert(tgt_idx, case)
+        self._selected_id = case.id
+        self._refresh_table()
+        self._set_status(f"Urutan diubah: {case.no_tc} dipindah ke baris {tgt_idx + 1}.")
+
+    def _on_tc_context_menu(self, event) -> str:
+        if self.engine.busy or not self._tc_context_menu:
+            return "break"
+        region = self.tree.identify_region(event.x, event.y)
+        if region in {"heading", "separator"}:
+            return "break"
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return "break"
+        current = set(self.tree.selection())
+        if iid not in current:
+            self.tree.selection_set(iid)
+            self._selected_id = iid
+        else:
+            self._selected_id = iid
+        self.tree.focus_set()
+        x_root, y_root = int(event.x_root), int(event.y_root)
+        self.after(0, lambda: self._show_tc_context_menu(x_root, y_root))
+        return "break"
+
+    def _show_tc_context_menu(self, x_root: int, y_root: int) -> None:
+        if not self._tc_context_menu:
+            return
+        try:
+            self._tc_context_menu.tk_popup(x_root, y_root)
+        finally:
+            self._tc_context_menu.grab_release()
+
+    def _on_step_double(self, event) -> str | None:
+        if event.widget.identify_column(event.x) == "#1":
+            return "break"
+        if self._step_dragging:
+            return "break"
+        self.edit_step()
+        return None
+
+    def _on_step_drag_start(self, event) -> None:
+        if self.engine.busy or self.recording:
+            return
+        if event.state & 0x0005:
+            self._step_drag_iid = None
+            return
+        if self.steps_tree.identify_column(event.x) == "#1":
+            return
+        region = self.steps_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        iid = self.steps_tree.identify_row(event.y)
+        if not iid:
+            return
+        self._step_drag_iid = iid
+        self._step_drag_y = event.y
+        self._step_dragging = False
+
+    def _on_step_drag_motion(self, event) -> None:
+        if not self._step_drag_iid:
+            return
+        if abs(event.y - self._step_drag_y) > 8:
+            self._step_dragging = True
+
+    def _on_step_drag_drop(self, event) -> None:
+        if not self._step_drag_iid or not self._step_dragging:
+            self._step_drag_iid = None
+            self._step_dragging = False
+            return
+        target = self.steps_tree.identify_row(event.y)
+        if target and target != self._step_drag_iid:
+            self._reorder_step(self._step_drag_iid, target)
+        self._step_drag_iid = None
+        self._step_dragging = False
+
+    def _reorder_step(self, source_id: str, target_id: str) -> None:
+        if not self._can_edit_lists():
+            return
+        case = self._selected_case()
+        if not case:
+            return
+        try:
+            src_idx = next(i for i, step in enumerate(case.steps) if step.id == source_id)
+            tgt_idx = next(i for i, step in enumerate(case.steps) if step.id == target_id)
+        except StopIteration:
+            return
+        if src_idx == tgt_idx:
+            return
+        step = case.steps.pop(src_idx)
+        case.steps.insert(tgt_idx, step)
+        self._remap_after_move(case, src_idx, tgt_idx)
+        self._step_sel = step.id
+        self._refresh_table()
+        self._set_status(f"Urutan langkah diubah: {step.summary()} → baris {tgt_idx + 1}.")
+
+    def _on_step_context_menu(self, event) -> str:
+        if not self._step_context_menu or not self._selected_case():
+            return "break"
+        tree = self.steps_tree
+        if event.widget is tree:
+            region = tree.identify_region(event.x, event.y)
+            if region in {"heading", "separator"}:
+                return "break"
+            iid = tree.identify_row(event.y)
+        else:
+            iid = ""
+        if iid:
+            current = set(tree.selection())
+            if iid not in current:
+                tree.selection_set(iid)
+            self._step_sel = iid
+        else:
+            tree.selection_remove(*tree.selection())
+            self._step_sel = None
+        tree.focus_set()
+        self._update_step_context_menu()
+        x_root, y_root = int(event.x_root), int(event.y_root)
+        self.after(0, lambda: self._show_step_context_menu(x_root, y_root))
+        return "break"
+
+    def _show_step_context_menu(self, x_root: int, y_root: int) -> None:
+        if not self._step_context_menu:
+            return
+        try:
+            self._step_context_menu.tk_popup(x_root, y_root)
+        finally:
+            self._step_context_menu.grab_release()
+
+    def copy_steps(self) -> None:
+        if not self._can_edit_lists():
+            return
+        targets = sorted(self._target_steps(), key=lambda item: item[1])
+        if not targets:
+            messagebox.showinfo("JAQA", "Pilih langkah yang akan disalin.")
+            return
+        self._step_clipboard = [step.duplicate() for _case, _index, step in targets]
+        self._sync_step_clipboard_out()
+        label = self._step_clipboard[0].summary() if len(self._step_clipboard) == 1 else f"{len(self._step_clipboard)} langkah"
+        self._set_status(f"Disalin: {label}")
+
+    def paste_steps(self) -> None:
+        if self.engine.busy:
+            messagebox.showinfo("JAQA", "Selesaikan rekaman/run terlebih dahulu.")
+            return
+        case = self._selected_case()
+        if not case:
+            messagebox.showinfo("JAQA", "Pilih test case terlebih dahulu.")
+            return
+        if not self._load_step_clipboard():
+            messagebox.showinfo("JAQA", "Tidak ada langkah di clipboard. Gunakan Copy terlebih dahulu.")
+            return
+        insert_at = self._step_paste_index(case)
+        clones: list[Step] = []
+        for i, template in enumerate(self._step_clipboard):
+            clone = template.duplicate()
+            pos = insert_at + i
+            case.steps.insert(pos, clone)
+            self._remap_after_insert(case, pos)
+            clones.append(clone)
+        self._step_sel = clones[-1].id
+        self._refresh_table()
+        self.steps_tree.selection_set(*[clone.id for clone in clones])
+        label = clones[0].summary() if len(clones) == 1 else f"{len(clones)} langkah"
+        self._set_status(f"Ditempel: {label}")
+
+    def _toggle_check(self, case_id: str) -> None:
+        if case_id in self._checked_ids:
+            self._checked_ids.discard(case_id)
+        else:
+            self._checked_ids.add(case_id)
+        if self.tree.exists(case_id):
+            case = next((item for item in self.suite.test_cases if item.id == case_id), None)
+            if case:
+                self.tree.item(
+                    case_id,
+                    text="",
+                    image=self.check_on if case.id in self._checked_ids else self.check_off,
+                    values=self._case_values(case),
+                )
+
+    def _toggle_check_all(self) -> None:
+        ids = [case.id for case in self.suite.test_cases]
+        if ids and all(case_id in self._checked_ids for case_id in ids):
+            self._checked_ids.clear()
+        else:
+            self._checked_ids = set(ids)
+        self._refresh_table()
+
+    def _target_cases(self) -> list[TestCase]:
+        checked = [case for case in self.suite.test_cases if case.id in self._checked_ids]
+        if checked:
+            return checked
+        return self._selected_cases()
+
+    def enable_selected(self) -> None:
+        self._set_enabled(True)
+
+    def disable_selected(self) -> None:
+        self._set_enabled(False)
+
+    def _set_enabled(self, enabled: bool) -> None:
+        if self.engine.busy:
+            messagebox.showinfo("JAQA", "Selesaikan rekaman/run terlebih dahulu.")
+            return
+        cases = self._target_cases()
+        if not cases:
+            messagebox.showinfo("JAQA", "Centang atau pilih test case terlebih dahulu.")
+            return
+        for case in cases:
+            case.enabled = enabled
+        label = "ENABLE" if enabled else "DISABLE"
+        self._refresh_table()
+        names = ", ".join(case.no_tc for case in cases[:5])
+        extra = f" (+{len(cases) - 5})" if len(cases) > 5 else ""
+        self._set_status(f"{label}: {names}{extra}")
+
+    def _enabled_only(self, cases: list[TestCase]) -> list[TestCase]:
+        return [case for case in cases if case.enabled]
+
     def _refresh_table(self, keep_selection: bool = True) -> None:
-        selected = self._selected_iid() if keep_selection else None
+        self._finish_cell_edit(save=False)
+        selected = list(self.tree.selection()) if keep_selection else []
+        if keep_selection and not selected and self._selected_id:
+            selected = [self._selected_id]
         self.tree.delete(*self.tree.get_children())
         for index, case in enumerate(self.suite.test_cases):
-            self.tree.insert("", "end", iid=case.id, values=self._case_values(case), tags=(self._tag_for(case, index),))
-        if selected and self.tree.exists(selected):
-            self.tree.selection_set(selected)
-            self.tree.see(selected)
+            self.tree.insert(
+                "",
+                "end",
+                iid=case.id,
+                text="",
+                image=self.check_on if case.id in self._checked_ids else self.check_off,
+                values=self._case_values(case),
+                tags=(self._tag_for(case, index),),
+            )
+        existing = [iid for iid in selected if self.tree.exists(iid)]
+        if existing:
+            self.tree.selection_set(*existing)
+            self.tree.see(existing[-1])
+            self._selected_id = existing[-1]
         elif self.suite.test_cases:
             last = self.suite.test_cases[-1].id
             self.tree.selection_set(last)
@@ -287,8 +1071,12 @@ class MainWindow(ctk.CTk):
 
     def _refresh_details(self) -> None:
         case = self._selected_case()
-        step_keep = self._step_sel or (self.steps_tree.selection()[0] if self.steps_tree.selection() else None)
-        exp_keep = self._exp_sel or (self.exp_tree.selection()[0] if self.exp_tree.selection() else None)
+        step_keep = list(self.steps_tree.selection())
+        if not step_keep and self._step_sel:
+            step_keep = [self._step_sel]
+        exp_keep = list(self.exp_tree.selection())
+        if not exp_keep and self._exp_sel:
+            exp_keep = [self._exp_sel]
         self.steps_tree.delete(*self.steps_tree.get_children())
         self.exp_tree.delete(*self.exp_tree.get_children())
         self.run_box.configure(state="normal")
@@ -299,28 +1087,36 @@ class MainWindow(ctk.CTk):
         for index, step in enumerate(case.steps, start=1):
             delay = format_delay(step.delay_ms) if step.type != "wait" else "—"
             nilai = step.value if step.type != "goto" else step.url
+            mark = "☑" if step.id in self._checked_step_ids else "☐"
             self.steps_tree.insert(
                 "",
                 "end",
                 iid=step.id,
-                values=(index, step.type_label(), step.summary(), delay, step.selector, nilai),
+                values=(mark, index, step.type_label(), step.summary(), delay, step.selector, nilai),
                 tags=("odd" if index % 2 else "even",),
             )
         for index, item in enumerate(case.expectations, start=1):
             after = f"Langkah {item.after_step}" if item.after_step else "Akhir"
+            mark = "☑" if item.id in self._checked_exp_ids else "☐"
             self.exp_tree.insert(
                 "",
                 "end",
                 iid=item.id,
-                values=(index, item.label or item.selector, item.kind, item.match, item.expected_value, after),
+                values=(mark, index, item.label or item.selector, item.kind, item.match, item.expected_value, after),
                 tags=("odd" if index % 2 else "even",),
             )
-        if step_keep and self.steps_tree.exists(step_keep):
-            self.steps_tree.selection_set(step_keep)
-            self.steps_tree.see(step_keep)
-        if exp_keep and self.exp_tree.exists(exp_keep):
-            self.exp_tree.selection_set(exp_keep)
-            self.exp_tree.see(exp_keep)
+        if step_keep:
+            existing_steps = [iid for iid in step_keep if self.steps_tree.exists(iid)]
+            if existing_steps:
+                self.steps_tree.selection_set(*existing_steps)
+                self.steps_tree.see(existing_steps[-1])
+                self._step_sel = existing_steps[-1]
+        if exp_keep:
+            existing_exp = [iid for iid in exp_keep if self.exp_tree.exists(iid)]
+            if existing_exp:
+                self.exp_tree.selection_set(*existing_exp)
+                self.exp_tree.see(existing_exp[-1])
+                self._exp_sel = existing_exp[-1]
         if case.status or case.expectation_results:
             header = f"Status: {case.status or '—'}   •   {case.last_run_at or ''}\n{case.notes}\n\n"
             details = []
@@ -373,9 +1169,36 @@ class MainWindow(ctk.CTk):
         if not ask_yes_no(self, "Hapus Test Case", f"Hapus {case.no_tc} beserta rekaman dan expected-nya?"):
             return
         self.suite.test_cases = [item for item in self.suite.test_cases if item.id != case.id]
+        self._checked_ids.discard(case.id)
         self._selected_id = None
         self._refresh_table(keep_selection=False)
         self._set_status(f"{case.no_tc} dihapus.")
+
+    def duplicate_case(self, with_steps: bool = False) -> None:
+        if self.engine.busy or self.recording:
+            messagebox.showinfo("JAQA", "Selesaikan rekaman/run terlebih dahulu.")
+            return
+        cases = self._selected_cases()
+        if not cases:
+            messagebox.showinfo("JAQA", "Pilih test case yang akan diduplikasi.")
+            return
+        clones: list[TestCase] = []
+        for case in reversed(cases):
+            clone = case.duplicate(with_steps=with_steps)
+            idx = self.suite.index_of(case.id)
+            self.suite.test_cases.insert(idx + 1, clone)
+            clones.append(clone)
+        clones.reverse()
+        self._selected_id = clones[-1].id
+        self._refresh_table()
+        clone_ids = [clone.id for clone in clones]
+        self.tree.selection_set(*clone_ids)
+        label = "Duplicate TC + Step" if with_steps else "Duplicate TC"
+        if len(clones) == 1:
+            extra = f" ({len(clones[0].steps)} langkah, {len(clones[0].expectations)} expected)" if with_steps else ""
+            self._set_status(f"{label}: {clones[0].no_tc}{extra}")
+        else:
+            self._set_status(f"{label}: {len(clones)} test case diduplikasi.")
 
     def _can_edit_lists(self) -> bool:
         if self.engine.busy:
@@ -386,36 +1209,56 @@ class MainWindow(ctk.CTk):
     def _on_step_select(self) -> None:
         sel = self.steps_tree.selection()
         if sel:
-            self._step_sel = sel[0]
+            self._step_sel = sel[-1]
 
     def _on_exp_select(self) -> None:
         sel = self.exp_tree.selection()
         if sel:
-            self._exp_sel = sel[0]
+            self._exp_sel = sel[-1]
 
     def _selected_step(self) -> tuple[TestCase, int, Step] | None:
-        case = self._selected_case()
-        if not case:
-            return None
-        iid = self._step_sel or (self.steps_tree.selection()[0] if self.steps_tree.selection() else None)
-        if not iid:
-            return None
-        for index, step in enumerate(case.steps):
-            if step.id == iid:
-                return case, index, step
-        return None
+        targets = self._target_steps()
+        return targets[0] if targets else None
 
     def _selected_expectation(self) -> tuple[TestCase, int, Expectation] | None:
+        targets = self._target_expectations()
+        return targets[0] if targets else None
+
+    def _target_steps(self) -> list[tuple[TestCase, int, Step]]:
         case = self._selected_case()
         if not case:
-            return None
-        iid = self._exp_sel or (self.exp_tree.selection()[0] if self.exp_tree.selection() else None)
-        if not iid:
-            return None
-        for index, item in enumerate(case.expectations):
-            if item.id == iid:
-                return case, index, item
-        return None
+            return []
+        sel = list(self.steps_tree.selection())
+        if not sel and self._step_sel:
+            sel = [self._step_sel]
+        if sel:
+            by_id = {step.id: (index, step) for index, step in enumerate(case.steps)}
+            result: list[tuple[TestCase, int, Step]] = []
+            for iid in sel:
+                hit = by_id.get(iid)
+                if hit:
+                    result.append((case, hit[0], hit[1]))
+            if result:
+                return result
+        return [(case, index, step) for index, step in enumerate(case.steps) if step.id in self._checked_step_ids]
+
+    def _target_expectations(self) -> list[tuple[TestCase, int, Expectation]]:
+        case = self._selected_case()
+        if not case:
+            return []
+        sel = list(self.exp_tree.selection())
+        if not sel and self._exp_sel:
+            sel = [self._exp_sel]
+        if sel:
+            by_id = {item.id: (index, item) for index, item in enumerate(case.expectations)}
+            result: list[tuple[TestCase, int, Expectation]] = []
+            for iid in sel:
+                hit = by_id.get(iid)
+                if hit:
+                    result.append((case, hit[0], hit[1]))
+            if result:
+                return result
+        return [(case, index, item) for index, item in enumerate(case.expectations) if item.id in self._checked_exp_ids]
 
     def _remap_after_insert(self, case: TestCase, inserted_at: int) -> None:
         for item in case.expectations:
@@ -482,16 +1325,19 @@ class MainWindow(ctk.CTk):
     def delete_step(self) -> None:
         if not self._can_edit_lists():
             return
-        selected = self._selected_step()
-        if not selected:
-            messagebox.showinfo("JAQA", "Pilih langkah yang akan dihapus.")
+        targets = self._target_steps()
+        if not targets:
+            messagebox.showinfo("JAQA", "Centang atau pilih langkah yang akan dihapus.")
             return
-        case, index, step = selected
-        if not ask_yes_no(self, "Hapus Langkah", f"Hapus langkah: {step.summary()}?"):
+        label = targets[0][2].summary() if len(targets) == 1 else f"{len(targets)} langkah terpilih"
+        if not ask_yes_no(self, "Delete Step", f"Hapus {label}?"):
             return
-        case.steps.pop(index)
-        self._remap_after_delete(case, index)
-        self._step_sel = case.steps[min(index, len(case.steps) - 1)].id if case.steps else None
+        case = targets[0][0]
+        for _case, index, step in sorted(targets, key=lambda item: item[1], reverse=True):
+            case.steps.pop(index)
+            self._remap_after_delete(case, index)
+            self._checked_step_ids.discard(step.id)
+        self._step_sel = case.steps[min(targets[0][1], len(case.steps) - 1)].id if case.steps else None
         self._refresh_table()
 
     def move_step_up(self) -> None:
@@ -549,15 +1395,18 @@ class MainWindow(ctk.CTk):
     def delete_expectation(self) -> None:
         if not self._can_edit_lists():
             return
-        selected = self._selected_expectation()
-        if not selected:
-            messagebox.showinfo("JAQA", "Pilih expected result yang akan dihapus.")
+        targets = self._target_expectations()
+        if not targets:
+            messagebox.showinfo("JAQA", "Centang atau pilih expected result yang akan dihapus.")
             return
-        case, index, item = selected
-        if not ask_yes_no(self, "Hapus Expected", f"Hapus expected: {item.summary()}?"):
+        label = targets[0][2].summary() if len(targets) == 1 else f"{len(targets)} expected terpilih"
+        if not ask_yes_no(self, "Delete Expected", f"Hapus {label}?"):
             return
-        case.expectations.pop(index)
-        self._exp_sel = case.expectations[min(index, len(case.expectations) - 1)].id if case.expectations else None
+        case = targets[0][0]
+        for _case, index, item in sorted(targets, key=lambda row: row[1], reverse=True):
+            case.expectations.pop(index)
+            self._checked_exp_ids.discard(item.id)
+        self._exp_sel = case.expectations[min(targets[0][1], len(case.expectations) - 1)].id if case.expectations else None
         self._refresh_table()
 
     def move_expectation_up(self) -> None:
@@ -601,14 +1450,18 @@ class MainWindow(ctk.CTk):
         self._recording_case_id = case.id
         self._last_record_ts = time.monotonic()
         self.rec_badge.configure(text="● RECORDING")
-        self._set_status(f"Merekam {case.no_tc}. Lakukan langkah di browser. Klik Expected Element untuk menandai hasil.")
+        self._set_status(f"Merekam {case.no_tc}. Lakukan langkah di browser. Klik EXPECTED RESULT untuk menandai hasil.")
 
     def toggle_expect(self) -> None:
         if not self.recording:
-            messagebox.showinfo("JAQA", "Expected Element hanya tersedia saat RECORD berlangsung.")
+            messagebox.showinfo("JAQA", "EXPECTED RESULT hanya tersedia saat RECORD berlangsung.")
             return
-        self.expect_armed = not self.expect_armed
-        self.engine.set_expect_mode(self.expect_armed)
+        self._apply_expect_mode(not self.expect_armed)
+
+    def _apply_expect_mode(self, enabled: bool, sync_browser: bool = True) -> None:
+        self.expect_armed = bool(enabled)
+        if sync_browser:
+            self.engine.set_expect_mode(self.expect_armed)
         if self.expect_armed:
             self.rec_badge.configure(text="● EXPECTED MODE")
             self._set_status("Mode Expected aktif. Klik elemen di browser, lalu isi nilai yang diharapkan.")
@@ -620,20 +1473,23 @@ class MainWindow(ctk.CTk):
         if self.engine.busy:
             messagebox.showinfo("JAQA", "Mesin otomasi sedang berjalan.")
             return
-        if not cases:
-            messagebox.showinfo("JAQA", "Tidak ada test case yang dipilih.")
+        runnable = self._enabled_only(cases)
+        skipped = len(cases) - len(runnable)
+        if not runnable:
+            messagebox.showinfo("JAQA", "Tidak ada test case ENABLE yang bisa dijalankan.")
             return
-        for case in cases:
+        for case in runnable:
             case.status = "RUNNING"
             case.notes = "Sedang dijalankan..."
             case.expectation_results = []
         self._refresh_table()
         try:
-            self.engine.run_cases(cases)
+            self.engine.run_cases(runnable)
         except RuntimeError as exc:
             messagebox.showerror("JAQA", str(exc))
             return
-        self._set_status(f"Menjalankan {len(cases)} test case...")
+        extra = f"  •  {skipped} DISABLE dilewati" if skipped else ""
+        self._set_status(f"Menjalankan {len(runnable)} test case ENABLE...{extra}")
 
     def run_selected(self) -> None:
         case = self._require_case()
@@ -655,39 +1511,209 @@ class MainWindow(ctk.CTk):
             self.engine.stop()
             self._set_status("Meminta berhenti...")
 
-    def import_json(self) -> None:
+    def _busy_blocked(self) -> bool:
         if self.engine.busy:
-            return
-        path = filedialog.askopenfilename(title="Impor JSON JAQA", filetypes=[("JSON", "*.json"), ("Semua", "*.*")])
-        if not path:
-            return
-        try:
-            imported = import_json(path)
-        except Exception as exc:
-            messagebox.showerror("JAQA", f"Gagal impor JSON:\n{exc}")
-            return
-        if self.suite.test_cases and not ask_yes_no(self, "Impor JSON", "Ganti suite saat ini dengan isi file JSON?"):
-            return
-        self.suite = imported
-        self._selected_id = None
-        self._refresh_table(keep_selection=False)
-        self._set_status(f"Diimpor {len(self.suite.test_cases)} test case dari {Path(path).name}")
+            messagebox.showinfo("JAQA", "Selesaikan rekaman/run terlebih dahulu.")
+            return True
+        return False
 
-    def export_json_file(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Ekspor JSON",
-            defaultextension=".json",
-            filetypes=[("JSON", "*.json")],
-            initialfile="jaqa_testcases.json",
+    def _ask_browser_import(self, title: str) -> BrowserImportSource | None:
+        dialog = BrowserImportDialog(self, title=title)
+        self.wait_window(dialog)
+        return dialog.result
+
+    def copy_cookies_from_browser(self) -> None:
+        if self._busy_blocked():
+            return
+        case = self._require_case()
+        if not case:
+            return
+        source = self._ask_browser_import("Copy Cookies from Existing Browser")
+        if not source:
+            return
+        self._set_status("Menyalin cookies dari browser...")
+        threading.Thread(
+            target=self._copy_cookies_worker,
+            args=(case.id, source),
+            daemon=True,
+            name="jaqa-copy-cookies",
+        ).start()
+
+    def copy_session_from_browser(self) -> None:
+        if self._busy_blocked():
+            return
+        case = self._require_case()
+        if not case:
+            return
+        source = self._ask_browser_import("Copy Session from Existing Browser")
+        if not source:
+            return
+        self._set_status("Menyalin session dari browser...")
+        threading.Thread(
+            target=self._copy_session_worker,
+            args=(case.id, source),
+            daemon=True,
+            name="jaqa-copy-session",
+        ).start()
+
+    def _copy_cookies_worker(self, case_id: str, source: BrowserImportSource) -> None:
+        try:
+            cookies, warnings = fetch_cookies(source)
+            self.events.put(
+                ("cookies_copied", {"case_id": case_id, "cookies": cookies, "count": len(cookies), "warnings": warnings})
+            )
+        except Exception as exc:
+            self.events.put(("error", {"message": f"Gagal menyalin cookies:\n{exc}"}))
+
+    def _copy_session_worker(self, case_id: str, source: BrowserImportSource) -> None:
+        try:
+            storage_state, warnings = fetch_storage_state(source)
+            cookies = storage_state.get("cookies") or []
+            self.events.put(
+                (
+                    "session_copied",
+                    {
+                        "case_id": case_id,
+                        "storage_state": storage_state,
+                        "cookies": cookies,
+                        "count": len(cookies),
+                        "origins": len(storage_state.get("origins") or []),
+                        "warnings": warnings,
+                    },
+                )
+            )
+        except Exception as exc:
+            self.events.put(("error", {"message": f"Gagal menyalin session:\n{exc}"}))
+
+    def _initial_dir(self) -> str:
+        if self.config_path:
+            return str(self.config_path.parent)
+        last = last_config_path()
+        return str(last.parent) if last else str(Path.home())
+
+    def new_config(self) -> None:
+        if self._busy_blocked():
+            return
+        if self.suite.test_cases and not ask_yes_no(self, "New Config", "Buat config baru? Perubahan yang belum disimpan akan hilang."):
+            return
+        self.suite = TestSuite()
+        self.config_path = None
+        self._selected_id = None
+        self._checked_ids.clear()
+        self._refresh_table(keep_selection=False)
+        self._sync_title()
+        self._set_status("Config baru. Tambah test case atau simpan sebagai file JSON.")
+
+    def open_config(self) -> None:
+        if self._busy_blocked():
+            return
+        path = filedialog.askopenfilename(
+            title="Open Config File (JSON)",
+            filetypes=[("JSON", "*.json"), ("Semua", "*.*")],
+            initialdir=self._initial_dir(),
         )
         if not path:
             return
-        export_json(self.suite, path)
-        self._set_status(f"JSON tersimpan: {path}")
+        try:
+            opened = import_json(path)
+        except Exception as exc:
+            messagebox.showerror("JAQA", f"Gagal membuka config JSON:\n{exc}")
+            return
+        if self.suite.test_cases and not ask_yes_no(self, "Open Config", "Ganti suite saat ini dengan isi file JSON?"):
+            return
+        self.suite = opened
+        self.config_path = Path(path)
+        remember_config_path(self.config_path)
+        self._selected_id = None
+        self._refresh_table(keep_selection=False)
+        self._sync_title()
+        self._set_status(f"Config dibuka: {self.config_path.name}  ({len(self.suite.test_cases)} TC)")
 
-    def export_excel_file(self) -> None:
+    def save_config(self) -> None:
+        if self.config_path:
+            try:
+                export_json(self.suite, self.config_path)
+            except Exception as exc:
+                messagebox.showerror("JAQA", f"Gagal menyimpan config:\n{exc}")
+                return
+            remember_config_path(self.config_path)
+            self._autosave()
+            self._set_status(f"Config disimpan: {self.config_path}")
+            return
+        self.save_as_config()
+
+    def save_as_config(self) -> None:
+        initial = self.config_path.name if self.config_path else "jaqa_config.json"
         path = filedialog.asksaveasfilename(
-            title="Ekspor Excel",
+            title="Save As Config File (JSON)",
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json")],
+            initialdir=self._initial_dir(),
+            initialfile=initial,
+        )
+        if not path:
+            return
+        try:
+            export_json(self.suite, path)
+        except Exception as exc:
+            messagebox.showerror("JAQA", f"Gagal menyimpan config:\n{exc}")
+            return
+        self.config_path = Path(path)
+        remember_config_path(self.config_path)
+        self._autosave()
+        self._sync_title()
+        self._set_status(f"Config disimpan: {self.config_path}")
+
+    def import_tc_file(self) -> None:
+        if self._busy_blocked():
+            return
+        path = filedialog.askopenfilename(
+            title="Import TC File (Excel)",
+            filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("Semua", "*.*")],
+            initialdir=self._initial_dir(),
+        )
+        if not path:
+            return
+        try:
+            imported = import_tc_excel(path)
+        except Exception as exc:
+            messagebox.showerror("JAQA", f"Gagal impor TC Excel:\n{exc}")
+            return
+        if not imported.test_cases:
+            messagebox.showwarning("JAQA", "Tidak ada test case yang bisa dibaca dari file Excel.")
+            return
+        if self.suite.test_cases:
+            replace = ask_yes_no(
+                self,
+                "Import TC File",
+                f"Suite saat ini berisi {len(self.suite.test_cases)} TC.\n\nYa = ganti semua.\nTidak = tambahkan TC dari Excel.",
+            )
+            if replace:
+                self.suite = imported
+            else:
+                self.suite.test_cases.extend(imported.test_cases)
+        else:
+            self.suite = imported
+        self._selected_id = None
+        self._refresh_table(keep_selection=False)
+        self._set_status(f"TC diimpor dari {Path(path).name}: {len(imported.test_cases)} baris")
+
+    def export_tc_file(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Export TC File as Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialdir=str(reports_dir()),
+            initialfile="JAQA_TC.xlsx",
+        )
+        if not path:
+            return
+        export_tc_excel(self.suite, path)
+        self._set_status(f"TC File Excel tersimpan: {path}")
+
+    def export_result_excel(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Export TC Result as Excel",
             defaultextension=".xlsx",
             filetypes=[("Excel", "*.xlsx")],
             initialdir=str(reports_dir()),
@@ -696,11 +1722,11 @@ class MainWindow(ctk.CTk):
         if not path:
             return
         export_excel(self.suite, path)
-        self._set_status(f"Excel tersimpan: {path}")
+        self._set_status(f"Hasil Excel tersimpan: {path}")
 
-    def export_pdf_file(self) -> None:
+    def export_result_pdf(self) -> None:
         path = filedialog.asksaveasfilename(
-            title="Ekspor PDF",
+            title="Export TC Result as Pdf",
             defaultextension=".pdf",
             filetypes=[("PDF", "*.pdf")],
             initialdir=str(reports_dir()),
@@ -709,7 +1735,11 @@ class MainWindow(ctk.CTk):
         if not path:
             return
         export_pdf(self.suite, path)
-        self._set_status(f"PDF tersimpan: {path}")
+        self._set_status(f"Hasil PDF tersimpan: {path}")
+
+    def show_about(self) -> None:
+        dialog = AboutDialog(self)
+        self.wait_window(dialog)
 
     def _on_engine_event(self, kind: str, payload: dict) -> None:
         self.events.put((kind, payload))
@@ -759,6 +1789,31 @@ class MainWindow(ctk.CTk):
                 gap = int((time.monotonic() - self._last_record_ts) * 1000)
                 case.steps[-1].delay_ms = max(case.steps[-1].delay_ms, min(gap, MAX_RECORDED_DELAY_MS))
             self._add_expectation_from_pick(payload.get("payload") or payload)
+        elif kind == "expect_mode_changed":
+            self._apply_expect_mode(bool(payload.get("enabled")), sync_browser=False)
+        elif kind == "record_stop_requested":
+            self._set_status("Menghentikan rekaman...")
+        elif kind == "cookies_copied":
+            case = next((item for item in self.suite.test_cases if item.id == payload.get("case_id")), None)
+            if not case:
+                return
+            case.browser_cookies = payload.get("cookies") or []
+            case.browser_storage_state = {}
+            self._autosave()
+            extra = warnings_text(payload.get("warnings") or [])
+            self._set_status(f"{case.no_tc}: {payload.get('count', 0)} cookies disalin ke test case.{extra}")
+        elif kind == "session_copied":
+            case = next((item for item in self.suite.test_cases if item.id == payload.get("case_id")), None)
+            if not case:
+                return
+            case.browser_storage_state = payload.get("storage_state") or {}
+            case.browser_cookies = payload.get("cookies") or []
+            self._autosave()
+            origins = payload.get("origins", 0)
+            extra = warnings_text(payload.get("warnings") or [])
+            self._set_status(
+                f"{case.no_tc}: session disalin ({payload.get('count', 0)} cookies, {origins} origin localStorage).{extra}"
+            )
         elif kind == "record_started":
             self._set_status("Browser rekaman siap.")
         elif kind == "record_stopped":
@@ -803,7 +1858,9 @@ class MainWindow(ctk.CTk):
         if not case:
             return
         preview = payload_to_expectation(data, after_step=len(case.steps))
-        dialog = ExpectationDialog(self, preview, step_count=len(case.steps))
+        self.lift()
+        self.focus_force()
+        dialog = ExpectationDialog(self, preview, step_count=len(case.steps), topmost=True)
         self.wait_window(dialog)
         if not dialog.result:
             return

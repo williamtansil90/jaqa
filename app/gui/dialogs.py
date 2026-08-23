@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tkinter as tk
 from tkinter import ttk
 
 import customtkinter as ctk
@@ -9,7 +10,7 @@ from app.gui.theme import PALETTE
 
 
 class _FormDialog(ctk.CTkToplevel):
-    def __init__(self, master, title: str, width: int = 620, height: int = 560) -> None:
+    def __init__(self, master, title: str, width: int = 620, height: int = 560, *, topmost: bool = False) -> None:
         super().__init__(master)
         self.title(title)
         self.geometry(f"{width}x{height}")
@@ -18,12 +19,34 @@ class _FormDialog(ctk.CTkToplevel):
         self.transient(master)
         self.grab_set()
         self.result = None
+        self._topmost_mode = topmost
         self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.bind("<Escape>", lambda _e: self._cancel())
+        if topmost:
+            master.attributes("-topmost", True)
+            self.attributes("-topmost", True)
+            self.after(1, self._raise_over_browser)
+
+    def _raise_over_browser(self) -> None:
+        try:
+            self.master.lift()
+            self.lift()
+            self.focus_force()
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
 
     def _cancel(self) -> None:
         self.result = None
         self.destroy()
+
+    def destroy(self) -> None:
+        if self._topmost_mode:
+            try:
+                self.master.attributes("-topmost", False)
+            except Exception:
+                pass
+        super().destroy()
 
     def _field(self, parent, label: str, widget: ctk.CTkBaseClass, required: bool = False) -> None:
         text = f"{label} *" if required else label
@@ -185,8 +208,22 @@ class StepDialog(_FormDialog):
 
 
 class ExpectationDialog(_FormDialog):
-    def __init__(self, master, preview: dict, existing: Expectation | None = None, step_count: int = 0) -> None:
-        super().__init__(master, "Ubah Expected Result" if existing else "Tambah Expected Result", 560, 620)
+    def __init__(
+        self,
+        master,
+        preview: dict,
+        existing: Expectation | None = None,
+        step_count: int = 0,
+        *,
+        topmost: bool = False,
+    ) -> None:
+        super().__init__(
+            master,
+            "Ubah Expected Result" if existing else "Tambah Expected Result",
+            560,
+            620,
+            topmost=topmost,
+        )
         self.existing = existing
         wrap = ctk.CTkScrollableFrame(self, fg_color=PALETTE["surface"], corner_radius=12)
         wrap.pack(fill="both", expand=True, padx=16, pady=16)
@@ -283,6 +320,176 @@ class ExpectationDialog(_FormDialog):
         self.destroy()
 
 
+class BrowserImportDialog(_FormDialog):
+    def __init__(self, master, title: str = "Import from Browser") -> None:
+        super().__init__(master, title, 680, 580)
+        from app.core.browser_session import (
+            DEFAULT_CDP_URL,
+            DEFAULT_CHROME_PROFILE,
+            cdp_endpoint_available,
+            is_chrome_running,
+        )
+
+        wrap = ctk.CTkScrollableFrame(self, fg_color=PALETTE["surface"], corner_radius=12)
+        wrap.pack(fill="both", expand=True, padx=16, pady=16)
+
+        chrome_open = is_chrome_running()
+        cdp_ready = cdp_endpoint_available()
+        if chrome_open and cdp_ready:
+            status = "Chrome berjalan. CDP aktif — mode CDP URL siap dipakai."
+            status_color = PALETTE["accent"]
+        elif chrome_open:
+            status = (
+                "Chrome berjalan: profile path biasanya terkunci. "
+                "Tutup Chrome, atau jalankan Chrome dengan remote debugging lalu pilih CDP URL."
+            )
+            status_color = "#D97706"
+        elif cdp_ready:
+            status = "CDP aktif di 127.0.0.1:9222 — mode CDP URL siap dipakai."
+            status_color = PALETTE["accent"]
+        else:
+            status = "Profile path paling mudah jika Chrome ditutup."
+            status_color = PALETTE["muted"]
+
+        ctk.CTkLabel(
+            wrap,
+            text=status,
+            wraplength=600,
+            justify="left",
+            text_color=status_color,
+            anchor="w",
+        ).pack(fill="x", pady=(4, 10))
+
+        ctk.CTkLabel(
+            wrap,
+            text="Pilih sumber browser. Disarankan memakai Chrome Profile Path jika Chrome ditutup.",
+            wraplength=600,
+            justify="left",
+            text_color=PALETTE["muted"],
+            anchor="w",
+        ).pack(fill="x", pady=(0, 10))
+
+        self.mode = tk.StringVar(value="profile")
+
+        profile_box = ctk.CTkFrame(wrap, fg_color=PALETTE["surface_alt"], corner_radius=10)
+        profile_box.pack(fill="x", pady=(0, 10))
+        ctk.CTkRadioButton(
+            profile_box,
+            text="Chrome Profile Path",
+            variable=self.mode,
+            value="profile",
+            command=self._sync_mode,
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        profile_hint = (
+            "Tempel path folder profile Chrome, misalnya:\n"
+            r"C:\Users\<nama>\AppData\Local\Google\Chrome\User Data\Default\n\n"
+            "Tutup Chrome sebelum import agar cookies/session terbaca lengkap.\n"
+            "Jika Chrome masih terbuka, gunakan CDP URL."
+        )
+        ctk.CTkLabel(profile_box, text=profile_hint, wraplength=580, justify="left", text_color=PALETTE["muted"], anchor="w").pack(
+            fill="x", padx=28, pady=(0, 8)
+        )
+        self.profile_path = ctk.CTkEntry(profile_box, placeholder_text=str(DEFAULT_CHROME_PROFILE))
+        self.profile_path.pack(fill="x", padx=28, pady=(0, 12))
+        if DEFAULT_CHROME_PROFILE.exists():
+            self.profile_path.insert(0, str(DEFAULT_CHROME_PROFILE))
+
+        cdp_box = ctk.CTkFrame(wrap, fg_color=PALETTE["surface_alt"], corner_radius=10)
+        cdp_box.pack(fill="x")
+        ctk.CTkRadioButton(
+            cdp_box,
+            text="CDP URL (browser dengan remote debugging)",
+            variable=self.mode,
+            value="cdp",
+            command=self._sync_mode,
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        cdp_hint = (
+            "Chrome harus berjalan dengan flag --remote-debugging-port=9222.\n"
+            "Tutup Chrome dulu, lalu jalankan dari Command Prompt:\n"
+            r'"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222'
+        )
+        ctk.CTkLabel(cdp_box, text=cdp_hint, wraplength=580, justify="left", text_color=PALETTE["muted"], anchor="w").pack(
+            fill="x", padx=28, pady=(0, 8)
+        )
+        self.cdp_url = ctk.CTkEntry(cdp_box, placeholder_text=DEFAULT_CDP_URL)
+        self.cdp_url.pack(fill="x", padx=28, pady=(0, 8))
+        self.cdp_url.insert(0, DEFAULT_CDP_URL)
+        ctk.CTkButton(
+            cdp_box,
+            text="Jalankan Chrome dengan CDP",
+            fg_color=PALETTE["surface"],
+            hover_color=PALETTE["border"],
+            command=self._launch_chrome_cdp,
+        ).pack(anchor="w", padx=28, pady=(0, 12))
+
+        actions = ctk.CTkFrame(self, fg_color="transparent")
+        actions.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkButton(actions, text="Batal", fg_color=PALETTE["surface_alt"], hover_color=PALETTE["border"], command=self._cancel).pack(
+            side="right", padx=(8, 0)
+        )
+        ctk.CTkButton(actions, text="Import", fg_color=PALETTE["accent"], hover_color=PALETTE["accent_hover"], command=self._save).pack(
+            side="right"
+        )
+        self._sync_mode()
+        self.after(80, self.profile_path.focus_set)
+
+    def _sync_mode(self) -> None:
+        use_profile = self.mode.get() == "profile"
+        state = "normal" if use_profile else "disabled"
+        cdp_state = "disabled" if use_profile else "normal"
+        self.profile_path.configure(state=state)
+        self.cdp_url.configure(state=cdp_state)
+
+    def _launch_chrome_cdp(self) -> None:
+        from tkinter import messagebox
+
+        from app.core.browser_session import DEFAULT_CDP_PORT, is_chrome_running, launch_chrome_with_cdp, normalize_chrome_profile_path
+
+        if is_chrome_running():
+            messagebox.showwarning(
+                "JAQA",
+                "Chrome masih berjalan.\n\n"
+                "Tutup semua jendela Chrome terlebih dahulu, lalu klik tombol ini lagi.\n"
+                "Chrome tidak bisa dibuka ulang dengan CDP selama instance lama masih aktif.",
+                parent=self,
+            )
+            return
+        path = self.profile_path.get().strip()
+        if not path:
+            messagebox.showinfo("JAQA", "Isi Chrome Profile Path terlebih dahulu.", parent=self)
+            return
+        try:
+            user_data, profile_name = normalize_chrome_profile_path(path)
+            launch_chrome_with_cdp(user_data, profile_name, DEFAULT_CDP_PORT)
+            self.mode.set("cdp")
+            self._sync_mode()
+            messagebox.showinfo(
+                "JAQA",
+                "Chrome diluncurkan dengan remote debugging.\n"
+                "Tunggu beberapa detik, login jika perlu, lalu klik Import.",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror("JAQA", f"Gagal meluncurkan Chrome:\n{exc}", parent=self)
+
+    def _save(self) -> None:
+        from app.core.browser_session import BrowserImportSource
+
+        if self.mode.get() == "profile":
+            path = self.profile_path.get().strip()
+            if not path:
+                self.profile_path.focus_set()
+                return
+            self.result = BrowserImportSource(mode="profile", value=path)
+        else:
+            url = self.cdp_url.get().strip()
+            if not url:
+                self.cdp_url.focus_set()
+                return
+            self.result = BrowserImportSource(mode="cdp", value=url)
+        self.destroy()
+
+
 def ask_yes_no(master, title: str, message: str) -> bool:
     dialog = ctk.CTkToplevel(master)
     dialog.title(title)
@@ -333,3 +540,38 @@ def bind_tree_style(tree: ttk.Treeview) -> None:
     tree.tag_configure("run", background="#1E3A5F", foreground="#DBEAFE")
     tree.tag_configure("odd", background="#152033")
     tree.tag_configure("even", background=PALETTE["surface"])
+    tree.tag_configure("disabled", background="#1A1F2B", foreground="#64748B")
+
+
+class AboutDialog(ctk.CTkToplevel):
+    def __init__(self, master) -> None:
+        super().__init__(master)
+        from app import __about__, __author__, __full_name__, __release_date__, __version__
+
+        self.title("About JAQA")
+        self.geometry("520x300")
+        self.minsize(520, 300)
+        self.configure(fg_color=PALETTE["bg"])
+        self.transient(master)
+        self.grab_set()
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        card = ctk.CTkFrame(self, fg_color=PALETTE["surface"], corner_radius=14)
+        card.pack(fill="both", expand=True, padx=18, pady=18)
+        ctk.CTkLabel(card, text="JAQA", font=ctk.CTkFont(size=32, weight="bold"), text_color=PALETTE["gold"]).pack(pady=(22, 2))
+        ctk.CTkLabel(card, text=__full_name__, font=ctk.CTkFont(size=16), text_color=PALETTE["text"]).pack()
+        ctk.CTkLabel(
+            card,
+            text=f"v.{__version__}   •   {__release_date__}",
+            font=ctk.CTkFont(size=13),
+            text_color=PALETTE["muted"],
+        ).pack(pady=(6, 0))
+        ctk.CTkLabel(card, text=f"By {__author__}", font=ctk.CTkFont(size=13), text_color=PALETTE["accent_hover"]).pack(pady=(4, 12))
+        ctk.CTkLabel(
+            card,
+            text=__about__,
+            font=ctk.CTkFont(size=12),
+            text_color=PALETTE["muted"],
+            wraplength=440,
+        ).pack(padx=20)
+        ctk.CTkButton(card, text="Tutup", width=100, fg_color=PALETTE["accent"], hover_color=PALETTE["accent_hover"], command=self.destroy).pack(pady=18)

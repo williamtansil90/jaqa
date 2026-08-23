@@ -8,11 +8,11 @@ Rekam langkah pengguna di browser, tandai **Expected Result** pada elemen, jalan
 
 1. **Tambah TC** — isi `NO. TC`, Deskripsi, Aplikasi, URL, Username, Password, Expected Result.
 2. Pilih baris, klik **RECORD**. Browser terbuka ke URL. Lakukan langkah uji (klik, isi, pilih, Enter).
-3. Saat merekam, klik **Expected Element**, lalu klik elemen di halaman dan isi nilai yang diharapkan. Bisa berulang (beberapa expected per TC).
+3. Saat merekam, klik **EXPECTED RESULT**, lalu klik elemen di halaman dan isi nilai yang diharapkan. Bisa berulang (beberapa expected per TC).
 4. Klik **RECORD** lagi untuk berhenti. Rekaman + expected tersimpan otomatis.
 5. Jalankan:
-   - **Run Baris Ini**
-   - **Run Sampai Baris Ini**
+   - **Single Run**
+   - **Run Until**
    - **Run All**
 6. Setiap expected dinilai. OK hijau, NOK merah beserta alasan di kolom Catatan.
 7. **Ekspor JSON** / **Impor JSON** untuk berbagi suite. **Ekspor Excel** / **Ekspor PDF** untuk laporan SIT.

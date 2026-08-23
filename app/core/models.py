@@ -16,6 +16,19 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _as_enabled(value: Any, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"0", "false", "no", "tidak", "disable", "disabled", "off"}:
+        return False
+    if text in {"1", "true", "yes", "ya", "enable", "enabled", "on"}:
+        return True
+    return default
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
@@ -112,6 +125,11 @@ class Step:
             return f"Tunggu {format_delay(int(self.value or 0))}"
         return self.type
 
+    def duplicate(self) -> Step:
+        clone = Step.from_dict(self.to_dict())
+        clone.id = _new_id()
+        return clone
+
 
 @dataclass
 class Expectation:
@@ -165,6 +183,11 @@ class Expectation:
             return f"{target} @{self.attribute} {self.match} '{self.expected_value}'"
         return f"{target} {self.kind} {self.match} '{self.expected_value}'"
 
+    def duplicate(self) -> Expectation:
+        clone = Expectation.from_dict(self.to_dict())
+        clone.id = _new_id()
+        return clone
+
 
 @dataclass
 class ExpectationResult:
@@ -213,6 +236,9 @@ class TestCase:
     notes: str = ""
     last_run_at: str = ""
     expectation_results: list[ExpectationResult] = field(default_factory=list)
+    enabled: bool = True
+    browser_cookies: list[dict[str, Any]] = field(default_factory=list)
+    browser_storage_state: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -224,12 +250,15 @@ class TestCase:
             "username": self.username,
             "password": self.password,
             "expected_result": self.expected_result,
+            "enabled": self.enabled,
             "steps": [s.to_dict() for s in self.steps],
             "expectations": [e.to_dict() for e in self.expectations],
             "status": self.status,
             "notes": self.notes,
             "last_run_at": self.last_run_at,
             "expectation_results": [r.to_dict() for r in self.expectation_results],
+            "browser_cookies": self.browser_cookies,
+            "browser_storage_state": self.browser_storage_state,
         }
 
     @classmethod
@@ -251,6 +280,9 @@ class TestCase:
             expectation_results=[
                 ExpectationResult.from_dict(r) for r in data.get("expectation_results") or []
             ],
+            enabled=_as_enabled(data.get("enabled", True)),
+            browser_cookies=[dict(item) for item in data.get("browser_cookies") or []],
+            browser_storage_state=dict(data.get("browser_storage_state") or {}),
         )
 
     def reset_run(self) -> None:
@@ -258,6 +290,35 @@ class TestCase:
         self.notes = ""
         self.last_run_at = ""
         self.expectation_results = []
+
+    def duplicate(self, with_steps: bool = False) -> TestCase:
+        suffix = "-copy"
+        base_no = self.no_tc or "TC"
+        if with_steps:
+            clone = TestCase.from_dict(self.to_dict())
+            clone.id = _new_id()
+            clone.no_tc = f"{base_no}{suffix}"
+            clone.status = ""
+            clone.notes = ""
+            clone.last_run_at = ""
+            clone.expectation_results = []
+            for step in clone.steps:
+                step.id = _new_id()
+            for item in clone.expectations:
+                item.id = _new_id()
+            return clone
+        return TestCase(
+            no_tc=f"{base_no}{suffix}",
+            deskripsi=self.deskripsi,
+            aplikasi=self.aplikasi,
+            url=self.url,
+            username=self.username,
+            password=self.password,
+            expected_result=self.expected_result,
+            enabled=self.enabled,
+            browser_cookies=[dict(item) for item in self.browser_cookies],
+            browser_storage_state=dict(self.browser_storage_state),
+        )
 
 
 @dataclass

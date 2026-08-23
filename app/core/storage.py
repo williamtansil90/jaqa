@@ -28,6 +28,28 @@ def screenshots_dir() -> Path:
     return path
 
 
+def last_config_marker() -> Path:
+    return app_data_dir() / "last_config.txt"
+
+
+def remember_config_path(path: str | Path) -> None:
+    last_config_marker().write_text(str(Path(path)), encoding="utf-8")
+
+
+def last_config_path() -> Path | None:
+    marker = last_config_marker()
+    if not marker.exists():
+        return None
+    try:
+        text = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    target = Path(text)
+    return target if target.exists() else None
+
+
 def export_json(suite: TestSuite, path: str | Path) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)

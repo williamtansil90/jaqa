@@ -69,12 +69,22 @@ def _matches(actual: str, expected: str, mode: str) -> bool:
     return right.strip().lower() in left.strip().lower()
 
 
+def _new_automation_context(browser, test_case: TestCase):
+    if test_case.browser_storage_state:
+        return browser.new_context(no_viewport=True, storage_state=test_case.browser_storage_state)
+    context = browser.new_context(no_viewport=True)
+    if test_case.browser_cookies:
+        context.add_cookies(test_case.browser_cookies)
+    return context
+
+
 class AutomationEngine:
     def __init__(self, emit: EmitFn) -> None:
         self.emit = emit
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._expect_mode = False
+        self._expect_resync = False
         self._lock = threading.Lock()
         self._pages: list[Any] = []
         self._busy = False
@@ -102,15 +112,17 @@ class AutomationEngine:
 
     def set_expect_mode(self, enabled: bool) -> None:
         self._expect_mode = bool(enabled)
-        pages = list(self._pages)
-        for page in pages:
+        self._expect_resync = True
+
+    def _sync_expect_ui(self) -> None:
+        if not self._expect_resync:
+            return
+        self._expect_resync = False
+        for page in list(self._pages):
             try:
-                page.evaluate("on => window.__jaqa_set_expect_mode && window.__jaqa_set_expect_mode(on)", enabled)
+                page.evaluate("on => window.__jaqa_set_expect_mode && window.__jaqa_set_expect_mode(on)", self._expect_mode)
             except Exception:
-                try:
-                    page.evaluate(f"window.__JAQA_EXPECT_MODE__ = {str(bool(enabled)).lower()}")
-                except Exception:
-                    pass
+                pass
 
     def run_cases(self, cases: list[TestCase]) -> None:
         if self._busy:
@@ -139,9 +151,11 @@ class AutomationEngine:
 
             with sync_playwright() as playwright:
                 browser = launch_browser(playwright)
-                context = browser.new_context(no_viewport=True)
+                context = _new_automation_context(browser, test_case)
                 context.expose_function("__jaqa_action", self._on_action)
                 context.expose_function("__jaqa_expect", self._on_expect)
+                context.expose_function("__jaqa_toggle_expect", self._on_toggle_expect)
+                context.expose_function("__jaqa_stop_record", self._on_stop_record)
                 context.add_init_script(RECORDER_JS)
                 page = context.new_page()
                 with self._lock:
@@ -178,6 +192,7 @@ class AutomationEngine:
 
                 while not self._stop.is_set():
                     try:
+                        self._sync_expect_ui()
                         current = page.url
                         if current and current != last_url:
                             last_url = current
@@ -223,6 +238,19 @@ class AutomationEngine:
             return
         self._emit("expect_pick", payload=data)
 
+    def _on_toggle_expect(self, enabled: bool) -> None:
+        if self._stop.is_set():
+            return
+        self._expect_mode = bool(enabled)
+        self._expect_resync = True
+        self._emit("expect_mode_changed", enabled=self._expect_mode)
+
+    def _on_stop_record(self) -> None:
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        self._emit("record_stop_requested")
+
     def _run_worker(self, cases: list[TestCase]) -> None:
         apply_env()
         try:
@@ -255,7 +283,7 @@ class AutomationEngine:
         context = None
         page = None
         try:
-            context = browser.new_context(no_viewport=True)
+            context = _new_automation_context(browser, test_case)
             page = context.new_page()
             with self._lock:
                 self._pages = [page]
