@@ -107,8 +107,14 @@ class MainWindow(ctk.CTk):
         self._step_dragging = False
         self._exp_context_menu: tk.Menu | None = None
         self._exp_clipboard: list[Expectation] = []
+        self._tc_search = tk.StringVar()
+        self._step_search = tk.StringVar()
+        self._exp_search = tk.StringVar()
 
         self._build()
+        self._bind_search_refresh(self._tc_search, lambda: self._refresh_table(keep_selection=True, autosave=False))
+        self._bind_search_refresh(self._step_search, self._refresh_details)
+        self._bind_search_refresh(self._exp_search, self._refresh_details)
         self._refresh_table()
         self._set_status("Siap. Tambah test case, lalu rekam langkah pengguna.")
         self._sync_title()
@@ -181,6 +187,9 @@ class MainWindow(ctk.CTk):
         inner.pack(fill="both", expand=True, padx=8, pady=8)
 
         self.check_off, self.check_on = make_check_icons()
+        tc_search = tk.Frame(inner, bg=PALETTE["surface"])
+        tc_search.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self._build_search_box(tc_search, self._tc_search)
         self.tree = ttk.Treeview(inner, columns=[c[0] for c in COLUMNS], show="tree headings", selectmode="extended")
         bind_tree_style(self.tree)
         style = ttk.Style(self.tree)
@@ -208,10 +217,10 @@ class MainWindow(ctk.CTk):
         yscroll = ttk.Scrollbar(inner, orient="vertical", command=self.tree.yview)
         xscroll = ttk.Scrollbar(inner, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        yscroll.grid(row=0, column=1, sticky="ns")
-        xscroll.grid(row=1, column=0, sticky="ew")
-        inner.grid_rowconfigure(0, weight=1)
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        yscroll.grid(row=1, column=1, sticky="ns")
+        xscroll.grid(row=2, column=0, sticky="ew")
+        inner.grid_rowconfigure(1, weight=1)
         inner.grid_columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._on_select())
         self.tree.bind("<Button-1>", self._on_tree_click, add="+")
@@ -236,6 +245,7 @@ class MainWindow(ctk.CTk):
             "_checked_step_ids",
             selectmode="extended",
             on_active_toggle=self._toggle_step_enabled,
+            search_var=self._step_search,
         )
         self.steps_tree.unbind("<Double-1>")
         self.steps_tree.bind("<ButtonPress-1>", self._on_step_drag_start, add="+")
@@ -252,9 +262,6 @@ class MainWindow(ctk.CTk):
             ("Add Delay", self.add_delay_step),
             ("Move Up", self.move_step_up),
             ("Move Down", self.move_step_down),
-            ("Delete Step", self.delete_step),
-            ("Enable", lambda: self._set_steps_enabled(True)),
-            ("Disable", lambda: self._set_steps_enabled(False)),
         )
         self._pack_list_buttons(self.tab_steps, step_btns)
 
@@ -266,6 +273,7 @@ class MainWindow(ctk.CTk):
             "_checked_exp_ids",
             selectmode="extended",
             on_active_toggle=self._toggle_expectation_enabled,
+            search_var=self._exp_search,
         )
         self.exp_tree.unbind("<Double-1>")
         self.exp_tree.configure(selectmode="extended")
@@ -280,9 +288,6 @@ class MainWindow(ctk.CTk):
             ("Edit Expected", self.edit_expectation),
             ("Move Up", self.move_expectation_up),
             ("Move Down", self.move_expectation_down),
-            ("Delete Expected", self.delete_expectation),
-            ("Enable", lambda: self._set_expectations_enabled(True)),
-            ("Disable", lambda: self._set_expectations_enabled(False)),
         )
         self._pack_list_buttons(self.tab_exp, exp_btns)
 
@@ -595,6 +600,37 @@ class MainWindow(ctk.CTk):
         name = self.config_path.name if self.config_path else "untitled.json"
         self.title(f"{__full_name__}  •  v{__version__}  —  {name}")
 
+    def _bind_search_refresh(self, search_var: tk.StringVar, callback) -> None:
+        search_var.trace_add("write", lambda *_args: callback())
+
+    def _matches_search(self, values: tuple[str, ...], search_var: tk.StringVar) -> bool:
+        query = search_var.get().strip()
+        if not query:
+            return True
+        needle = query.lower()
+        return any(needle in str(value or "").lower() for value in values)
+
+    def _build_search_box(self, parent: tk.Frame, search_var: tk.StringVar, *, label: str = "Search") -> None:
+        tk.Label(
+            parent,
+            text=label,
+            font=("Segoe UI", 9),
+            bg=PALETTE["surface"],
+            fg=PALETTE["muted"],
+        ).pack(side="left", padx=(0, 8))
+        tk.Entry(
+            parent,
+            textvariable=search_var,
+            font=("Segoe UI", 9),
+            bg=PALETTE["surface_alt"],
+            fg=PALETTE["text"],
+            insertbackground=PALETTE["text"],
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=PALETTE["border"],
+            highlightcolor=PALETTE["accent"],
+        ).pack(side="left", fill="x", expand=True)
+
     def _make_list_tree(
         self,
         parent,
@@ -604,11 +640,19 @@ class MainWindow(ctk.CTk):
         check_attr: str,
         selectmode: str = "browse",
         on_active_toggle=None,
+        search_var: tk.StringVar | None = None,
     ) -> ttk.Treeview:
-        columns = (("sel", "☐", 40),) + tuple(columns)
+        data_columns = tuple(columns)
+        columns = (("sel", "☐", 40),) + data_columns
         wrap = tk.Frame(parent, bg=PALETTE["surface"])
         wrap.pack(side="left", fill="both", expand=True, padx=6, pady=6)
-        tree = ttk.Treeview(wrap, columns=[c[0] for c in columns], show="headings", selectmode=selectmode)
+        if search_var is not None:
+            search_row = tk.Frame(wrap, bg=PALETTE["surface"])
+            search_row.pack(fill="x", pady=(0, 4))
+            self._build_search_box(search_row, search_var)
+        tree_host = tk.Frame(wrap, bg=PALETTE["surface"])
+        tree_host.pack(fill="both", expand=True)
+        tree = ttk.Treeview(tree_host, columns=[c[0] for c in columns], show="headings", selectmode=selectmode)
         bind_tree_style(tree)
         for key, title, width in columns:
             tree.heading(key, text=title)
@@ -620,7 +664,7 @@ class MainWindow(ctk.CTk):
                 anchor="center" if key in {"sel", "no", "aktif"} else "w",
             )
         tree.heading("sel", command=lambda: self._toggle_list_check_all(tree, check_attr))
-        yscroll = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        yscroll = ttk.Scrollbar(tree_host, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=yscroll.set)
         tree.pack(side="left", fill="both", expand=True)
         yscroll.pack(side="right", fill="y")
@@ -1118,20 +1162,23 @@ class MainWindow(ctk.CTk):
     def _enabled_only(self, cases: list[TestCase]) -> list[TestCase]:
         return [case for case in cases if case.enabled]
 
-    def _refresh_table(self, keep_selection: bool = True) -> None:
+    def _refresh_table(self, keep_selection: bool = True, autosave: bool = True) -> None:
         self._finish_cell_edit(save=False)
         selected = list(self.tree.selection()) if keep_selection else []
         if keep_selection and not selected and self._selected_id:
             selected = [self._selected_id]
         self.tree.delete(*self.tree.get_children())
         for index, case in enumerate(self.suite.test_cases):
+            values = self._case_values(case)
+            if not self._matches_search(values, self._tc_search):
+                continue
             self.tree.insert(
                 "",
                 "end",
                 iid=case.id,
                 text="",
                 image=self.check_on if case.id in self._checked_ids else self.check_off,
-                values=self._case_values(case),
+                values=values,
                 tags=(self._tag_for(case, index),),
             )
         existing = [iid for iid in selected if self.tree.exists(iid)]
@@ -1144,7 +1191,8 @@ class MainWindow(ctk.CTk):
             self.tree.selection_set(last)
             self._selected_id = last
         self._refresh_details()
-        self._autosave()
+        if autosave:
+            self._autosave()
 
     def _refresh_details(self) -> None:
         case = self._selected_case()
@@ -1164,31 +1212,44 @@ class MainWindow(ctk.CTk):
         for index, step in enumerate(case.steps, start=1):
             delay = format_delay(step.delay_ms) if step.type != "wait" else "—"
             nilai = step.value if step.type != "goto" else step.url
+            row_values = (
+                self._active_icon(step.enabled),
+                str(index),
+                step.type_label(),
+                step.summary(),
+                delay,
+                step.selector,
+                nilai,
+            )
+            if not self._matches_search(row_values, self._step_search):
+                continue
             mark = "☑" if step.id in self._checked_step_ids else "☐"
             self.steps_tree.insert(
                 "",
                 "end",
                 iid=step.id,
-                values=(mark, self._active_icon(step.enabled), index, step.type_label(), step.summary(), delay, step.selector, nilai),
+                values=(mark, *row_values),
                 tags=("odd" if index % 2 else "even",),
             )
         for index, item in enumerate(case.expectations, start=1):
             after = f"Langkah {item.after_step}" if item.after_step else "Akhir"
+            row_values = (
+                self._active_icon(item.enabled),
+                str(index),
+                item.label or item.selector,
+                item.kind,
+                item.match,
+                item.expected_value,
+                after,
+            )
+            if not self._matches_search(row_values, self._exp_search):
+                continue
             mark = "☑" if item.id in self._checked_exp_ids else "☐"
             self.exp_tree.insert(
                 "",
                 "end",
                 iid=item.id,
-                values=(
-                    mark,
-                    self._active_icon(item.enabled),
-                    index,
-                    item.label or item.selector,
-                    item.kind,
-                    item.match,
-                    item.expected_value,
-                    after,
-                ),
+                values=(mark, *row_values),
                 tags=("odd" if index % 2 else "even",),
             )
         if step_keep:
