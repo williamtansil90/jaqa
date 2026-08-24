@@ -71,3 +71,9 @@ Hasil: `dist\JAQA.exe` (satu file, tanpa konsol).
 ```
 
 Session terakhir tersimpan di `%APPDATA%\JAQA\session.json`. Screenshot NOK di `%APPDATA%\JAQA\screenshots`.
+
+## Dokumentasi untuk AI
+
+Panduan lengkap format data, Excel, JSON, steps, expectations, dan cara membuat daftar TC:
+
+→ [`docs/JAQA-AI-GUIDE.md`](docs/JAQA-AI-GUIDE.md)

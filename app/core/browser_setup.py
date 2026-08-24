@@ -54,15 +54,32 @@ def install_chromium() -> None:
     subprocess.check_call(cmd, env=get_driver_env())
 
 
+BROWSER_ARGS = [
+    "--start-maximized",
+    "--disable-dev-shm-usage",
+    "--ignore-certificate-errors",
+    "--allow-insecure-localhost",
+]
+
+CONTEXT_KWARGS = {
+    "no_viewport": True,
+    "ignore_https_errors": True,
+}
+
+
 def launch_browser(playwright):
     apply_env()
-    args = ["--start-maximized", "--disable-dev-shm-usage"]
+    args = list(BROWSER_ARGS)
     for channel in ("chrome", "msedge"):
         try:
             return playwright.chromium.launch(channel=channel, headless=False, args=args)
         except Exception:
             continue
     return playwright.chromium.launch(headless=False, args=args)
+
+
+def new_browser_context(browser, **extra):
+    return browser.new_context(**CONTEXT_KWARGS, **extra)
 
 
 def python_or_frozen() -> str:

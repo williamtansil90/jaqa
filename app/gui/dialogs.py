@@ -71,11 +71,11 @@ class TestCaseDialog(_FormDialog):
 
         self._field(wrap, "NO. TC", self.no_tc, True)
         self._field(wrap, "Deskripsi", self.deskripsi)
-        self._field(wrap, "Aplikasi", self.aplikasi)
+        self._field(wrap, "Application", self.aplikasi)
         self._field(wrap, "URL", self.url, True)
         self._field(wrap, "Username", self.username)
         self._field(wrap, "Password", self.password)
-        self._field(wrap, "Expected Result (keterangan)", self.expected)
+        self._field(wrap, "Expectation", self.expected)
 
         if case:
             self.no_tc.insert(0, case.no_tc)
@@ -115,7 +115,7 @@ class TestCaseDialog(_FormDialog):
 
 class StepDialog(_FormDialog):
     def __init__(self, master, step: Step | None = None, delay_only: bool = False) -> None:
-        title = "Tambah Delay" if delay_only else ("Ubah Langkah" if step else "Tambah Langkah")
+        title = "Add Delay" if delay_only else ("Edit Step" if step else "Add Step")
         super().__init__(master, title, 560, 520 if not delay_only else 280)
         self.existing = step
         wrap = ctk.CTkFrame(self, fg_color=PALETTE["surface"], corner_radius=12)
@@ -219,7 +219,7 @@ class ExpectationDialog(_FormDialog):
     ) -> None:
         super().__init__(
             master,
-            "Ubah Expected Result" if existing else "Tambah Expected Result",
+            "Edit Expected Result" if existing else "Add Expected Result",
             560,
             620,
             topmost=topmost,
@@ -261,7 +261,7 @@ class ExpectationDialog(_FormDialog):
         self._rev_kind = {v: k for k, v in self._kind_map.items()}
         start_kind = existing.kind if existing else ("value" if input_like else "text")
         self.kind.set(self._rev_kind.get(start_kind, "Teks tampilan"))
-        self._field(wrap, "Jenis pemeriksaan", self.kind)
+        self._field(wrap, "Type", self.kind)
 
         self.attribute = ctk.CTkEntry(wrap, placeholder_text="contoh: href, class, src")
         self._field(wrap, "Nama atribut (jika jenis = atribut)", self.attribute)
@@ -273,10 +273,10 @@ class ExpectationDialog(_FormDialog):
         self._match_map = {v: k for k, v in match_labels.items()}
         start_match = existing.match if existing else "contains"
         self.match.set(next(k for k, v in self._match_map.items() if v == start_match))
-        self._field(wrap, "Cara membandingkan", self.match)
+        self._field(wrap, "Comparison", self.match)
 
         self.expected = ctk.CTkEntry(wrap, placeholder_text="Nilai yang diharapkan")
-        self._field(wrap, "Nilai expected", self.expected, True)
+        self._field(wrap, "Expected Value", self.expected, True)
         preset = existing.expected_value if existing else (preview.get("value") or sample or "")
         if preset:
             self.expected.insert(0, preset)
@@ -288,12 +288,12 @@ class ExpectationDialog(_FormDialog):
             self.after_step.set(f"Setelah langkah {current_after}")
         else:
             self.after_step.set("Di akhir test case")
-        self._field(wrap, "Periksa kapan", self.after_step)
+        self._field(wrap, "Check After", self.after_step)
 
         actions = ctk.CTkFrame(self, fg_color="transparent")
         actions.pack(fill="x", padx=16, pady=(0, 16))
         ctk.CTkButton(actions, text="Batal", fg_color=PALETTE["surface_alt"], hover_color=PALETTE["border"], command=self._cancel).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(actions, text="Simpan Expected", fg_color=PALETTE["accent"], hover_color=PALETTE["accent_hover"], command=self._save).pack(side="right")
+        ctk.CTkButton(actions, text="Save", fg_color=PALETTE["accent"], hover_color=PALETTE["accent_hover"], command=self._save).pack(side="right")
         self.after(80, self.expected.focus_set)
 
     def _save(self) -> None:

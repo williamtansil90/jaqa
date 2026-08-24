@@ -14,39 +14,45 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from app.core.models import Expectation, Step, TestCase, TestSuite, _as_enabled
+from app.core.models import (
+    Expectation,
+    Step,
+    EXPECT_EXPORT_FIELDS,
+    STEP_EXPORT_FIELDS,
+    TC_FIELD_LABELS,
+    TC_FILE_FIELDS,
+    TC_LIST_COLUMNS,
+    TestCase,
+    TestSuite,
+    _as_enabled,
+)
 
-HEADERS = [
-    "NO. TC",
-    "Deskripsi",
-    "Aplikasi",
-    "URL",
-    "Username",
-    "Password",
-    "Expected Result",
-    "Status",
-    "Catatan",
-]
+HEADERS = [label for _, label in TC_LIST_COLUMNS]
+TC_FILE_HEADERS = [TC_FIELD_LABELS[key] for key in TC_FILE_FIELDS]
+STEP_FILE_HEADERS = [label for _, label in STEP_EXPORT_FIELDS]
+EXPECT_FILE_HEADERS = [label for _, label in EXPECT_EXPORT_FIELDS]
+
+
+def _expectation_summary(case: TestCase) -> str:
+    if not case.expectations:
+        return ""
+    return "\n".join(f"• {item.summary()}" for item in case.expectations)
 
 
 def _rows(suite: TestSuite) -> list[list[str]]:
     rows: list[list[str]] = []
     for case in suite.test_cases:
-        expected = case.expected_result
-        extra = []
-        for item in case.expectations:
-            extra.append(item.summary())
-        if extra:
-            expected = (expected + "\n" if expected else "") + "\n".join(f"• {text}" for text in extra)
         rows.append(
             [
+                "ENABLE" if case.enabled else "DISABLE",
                 case.no_tc,
                 case.deskripsi,
                 case.aplikasi,
                 case.url,
                 case.username,
                 case.password,
-                expected,
+                case.expected_result,
+                _expectation_summary(case),
                 case.status or "BELUM DIUJI",
                 case.notes,
             ]
@@ -76,14 +82,14 @@ def export_excel(suite: TestSuite, path: str | Path) -> Path:
     white = Font(color="FFFFFF", bold=True, name="Calibri")
     wrap = Alignment(wrap_text=True, vertical="center")
 
-    sheet.merge_cells("A1:I1")
+    sheet.merge_cells("A1:K1")
     sheet["A1"] = "JAQA — Jalin Automate QA  |  Laporan Hasil SIT"
     sheet["A1"].font = Font(color="FFFFFF", bold=True, size=16, name="Calibri")
     sheet["A1"].fill = title_fill
     sheet["A1"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
     sheet.row_dimensions[1].height = 28
 
-    sheet.merge_cells("A2:I2")
+    sheet.merge_cells("A2:K2")
     ok_n = sum(1 for tc in suite.test_cases if tc.status == "OK")
     nok_n = sum(1 for tc in suite.test_cases if tc.status == "NOK")
     pending_n = len(suite.test_cases) - ok_n - nok_n
@@ -102,11 +108,11 @@ def export_excel(suite: TestSuite, path: str | Path) -> Path:
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = thin
     sheet.row_dimensions[3].height = 22
-    sheet.auto_filter.ref = f"A3:I{3 + max(len(suite.test_cases), 1)}"
+    sheet.auto_filter.ref = f"A3:K{3 + max(len(suite.test_cases), 1)}"
     sheet.freeze_panes = "A4"
 
     for row_idx, values in enumerate(_rows(suite), start=4):
-        status = values[7]
+        status = values[9]
         fill = ok_fill if status == "OK" else nok_fill if status == "NOK" else pending_fill
         sheet.row_dimensions[row_idx].height = 36
         for col, value in enumerate(values, start=1):
@@ -114,14 +120,14 @@ def export_excel(suite: TestSuite, path: str | Path) -> Path:
             cell.alignment = wrap
             cell.border = thin
             cell.font = Font(name="Calibri", size=10)
-            if col == 8:
+            if col == 10:
                 cell.fill = fill
                 cell.font = Font(name="Calibri", size=11, bold=True, color="14532D" if status == "OK" else "7F1D1D" if status == "NOK" else "334155")
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             elif row_idx % 2 == 0:
                 cell.fill = alt_fill
 
-    widths = [14, 36, 20, 34, 16, 16, 42, 14, 46]
+    widths = [12, 14, 36, 20, 34, 16, 16, 28, 42, 14, 46]
     for idx, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(idx)].width = width
 
@@ -178,10 +184,10 @@ def export_pdf(suite: TestSuite, path: str | Path) -> Path:
     data = [header]
     status_colors: list[str] = []
     for values in _rows(suite):
-        status = values[7]
+        status = values[9]
         status_colors.append(status)
         styled = [p(v) for v in values]
-        styled[7] = p(status, cell_center)
+        styled[9] = p(status, cell_center)
         data.append(styled)
 
     doc = SimpleDocTemplate(
@@ -196,14 +202,14 @@ def export_pdf(suite: TestSuite, path: str | Path) -> Path:
     )
     table = Table(
         data,
-        colWidths=[22 * mm, 38 * mm, 28 * mm, 40 * mm, 24 * mm, 24 * mm, 48 * mm, 20 * mm, 48 * mm],
+        colWidths=[16 * mm, 22 * mm, 38 * mm, 28 * mm, 40 * mm, 24 * mm, 24 * mm, 32 * mm, 48 * mm, 20 * mm, 48 * mm],
         repeatRows=1,
     )
     commands = [
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#115E67")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("ALIGN", (7, 0), (7, -1), "CENTER"),
+        ("ALIGN", (9, 0), (9, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#94A3B8")),
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
@@ -213,14 +219,14 @@ def export_pdf(suite: TestSuite, path: str | Path) -> Path:
     ]
     for idx, status in enumerate(status_colors, start=1):
         if status == "OK":
-            commands.append(("BACKGROUND", (7, idx), (7, idx), colors.HexColor("#86EFAC")))
+            commands.append(("BACKGROUND", (9, idx), (9, idx), colors.HexColor("#86EFAC")))
         elif status == "NOK":
-            commands.append(("BACKGROUND", (7, idx), (7, idx), colors.HexColor("#FCA5A5")))
+            commands.append(("BACKGROUND", (9, idx), (9, idx), colors.HexColor("#FCA5A5")))
         else:
-            commands.append(("BACKGROUND", (7, idx), (7, idx), colors.HexColor("#E2E8F0")))
+            commands.append(("BACKGROUND", (9, idx), (9, idx), colors.HexColor("#E2E8F0")))
         if idx % 2 == 0:
-            commands.append(("BACKGROUND", (0, idx), (6, idx), colors.HexColor("#F0FDFA")))
-            commands.append(("BACKGROUND", (8, idx), (8, idx), colors.HexColor("#F0FDFA")))
+            commands.append(("BACKGROUND", (0, idx), (8, idx), colors.HexColor("#F0FDFA")))
+            commands.append(("BACKGROUND", (10, idx), (10, idx), colors.HexColor("#F0FDFA")))
     table.setStyle(TableStyle(commands))
 
     story = [
@@ -235,7 +241,7 @@ def export_pdf(suite: TestSuite, path: str | Path) -> Path:
         table,
         Spacer(1, 8),
         Paragraph(
-            "Status OK (hijau) = semua expected result sesuai. Status NOK (merah) = ada expected yang gagal; lihat kolom Catatan.",
+            "Status OK (hijau) = semua expected result sesuai. Status NOK (merah) = ada expected yang gagal; lihat kolom Notes.",
             meta_style,
         ),
     ]
@@ -243,46 +249,45 @@ def export_pdf(suite: TestSuite, path: str | Path) -> Path:
     return target
 
 
-TC_FILE_HEADERS = [
-    "NO. TC",
-    "Deskripsi",
-    "Aplikasi",
-    "URL",
-    "Username",
-    "Password",
-    "Expected Result",
-    "Enabled",
-]
+def _export_values(fields: tuple[tuple[str, str], ...], row: dict[str, object]) -> list[object]:
+    return [row.get(key, "") for key, _label in fields]
 
-STEP_FILE_HEADERS = [
-    "NO. TC",
-    "Urutan",
-    "Type",
-    "Label",
-    "Selector",
-    "Value",
-    "URL",
-    "Key",
-    "Checked",
-    "Delay (ms)",
-    "Tag",
-    "ID",
-]
 
-EXPECT_FILE_HEADERS = [
-    "NO. TC",
-    "Urutan",
-    "Label",
-    "Selector",
-    "Kind",
-    "Match",
-    "Expected Value",
-    "Attribute",
-    "After Step",
-    "Tag",
-    "Sample",
-    "ID",
-]
+def _step_export_row(case_no: str, order: int, step: Step) -> dict[str, object]:
+    checked = "" if step.checked is None else ("TRUE" if step.checked else "FALSE")
+    return {
+        "no_tc": case_no,
+        "urutan": order,
+        "enabled": "ENABLE" if step.enabled else "DISABLE",
+        "type": step.type,
+        "label": step.label,
+        "selector": step.selector,
+        "value": step.value,
+        "url": step.url,
+        "key": step.key,
+        "checked": checked,
+        "delay_ms": step.delay_ms,
+        "tag": step.tag,
+        "id": step.id,
+    }
+
+
+def _expectation_export_row(case_no: str, order: int, item: Expectation) -> dict[str, object]:
+    return {
+        "no_tc": case_no,
+        "urutan": order,
+        "enabled": "ENABLE" if item.enabled else "DISABLE",
+        "label": item.label,
+        "selector": item.selector,
+        "kind": item.kind,
+        "match": item.match,
+        "expected_value": item.expected_value,
+        "attribute": item.attribute,
+        "after_step": item.after_step,
+        "tag": item.tag,
+        "sample_text": item.sample_text,
+        "id": item.id,
+    }
 
 
 def _norm_header(value: str) -> str:
@@ -290,11 +295,18 @@ def _norm_header(value: str) -> str:
 
 
 def _header_key(value: str) -> str | None:
+    text = (value or "").strip()
+    if text == "#":
+        return "urutan"
     aliases = {
+        "id": "id",
+        "active": "enabled",
+        "aktif": "enabled",
+        "enabled": "enabled",
+        "enable": "enabled",
         "notc": "no_tc",
         "notestcase": "no_tc",
         "tc": "no_tc",
-        "id": "id",
         "deskripsi": "deskripsi",
         "description": "deskripsi",
         "aplikasi": "aplikasi",
@@ -305,13 +317,18 @@ def _header_key(value: str) -> str | None:
         "user": "username",
         "password": "password",
         "pass": "password",
+        "ekspetasi": "expected_result",
+        "expectation": "expected_result",
         "expectedresult": "expected_result",
         "expected": "expected_result",
-        "enabled": "enabled",
-        "aktif": "enabled",
-        "enable": "enabled",
+        "notes": "notes",
+        "note": "notes",
+        "catatan": "notes",
+        "status": "status",
         "urutan": "urutan",
-        "no": "urutan",
+        "order": "urutan",
+        "step": "label",
+        "keterangan": "label",
         "type": "type",
         "tipe": "type",
         "label": "label",
@@ -327,10 +344,14 @@ def _header_key(value: str) -> str | None:
         "kind": "kind",
         "jenis": "kind",
         "match": "match",
+        "comparison": "match",
         "banding": "match",
         "expectedvalue": "expected_value",
         "attribute": "attribute",
         "afterstep": "after_step",
+        "checkafter": "after_step",
+        "perikasaetelah": "after_step",
+        "periksasetelah": "after_step",
         "sample": "sample_text",
     }
     return aliases.get(_norm_header(value))
@@ -367,6 +388,7 @@ def export_tc_excel(suite: TestSuite, path: str | Path) -> Path:
     _style_header_row(cases, TC_FILE_HEADERS + ["ID"], header_fill, white, thin)
     for row_idx, case in enumerate(suite.test_cases, start=2):
         values = [
+            "ENABLE" if case.enabled else "DISABLE",
             case.no_tc,
             case.deskripsi,
             case.aplikasi,
@@ -374,7 +396,7 @@ def export_tc_excel(suite: TestSuite, path: str | Path) -> Path:
             case.username,
             case.password,
             case.expected_result,
-            "ENABLE" if case.enabled else "DISABLE",
+            case.notes,
             case.id,
         ]
         for col, value in enumerate(values, start=1):
@@ -383,7 +405,7 @@ def export_tc_excel(suite: TestSuite, path: str | Path) -> Path:
             cell.border = thin
             cell.font = Font(name="Calibri", size=10)
         cases.row_dimensions[row_idx].height = 28
-    for idx, width in enumerate([14, 36, 20, 36, 16, 16, 42, 12, 16], start=1):
+    for idx, width in enumerate([12, 14, 36, 20, 36, 16, 16, 28, 46, 16], start=1):
         cases.column_dimensions[get_column_letter(idx)].width = width
 
     steps = book.create_sheet("Steps")
@@ -391,28 +413,14 @@ def export_tc_excel(suite: TestSuite, path: str | Path) -> Path:
     step_row = 2
     for case in suite.test_cases:
         for order, step in enumerate(case.steps, start=1):
-            checked = "" if step.checked is None else ("TRUE" if step.checked else "FALSE")
-            values = [
-                case.no_tc,
-                order,
-                step.type,
-                step.label,
-                step.selector,
-                step.value,
-                step.url,
-                step.key,
-                checked,
-                step.delay_ms,
-                step.tag,
-                step.id,
-            ]
+            values = _export_values(STEP_EXPORT_FIELDS, _step_export_row(case.no_tc, order, step))
             for col, value in enumerate(values, start=1):
                 cell = steps.cell(step_row, col, value)
                 cell.alignment = wrap
                 cell.border = thin
                 cell.font = Font(name="Calibri", size=10)
             step_row += 1
-    for idx, width in enumerate([14, 10, 12, 24, 28, 20, 28, 10, 12, 12, 12, 16], start=1):
+    for idx, width in enumerate([14, 8, 12, 12, 24, 28, 20, 28, 10, 12, 12, 12, 16], start=1):
         steps.column_dimensions[get_column_letter(idx)].width = width
 
     expects = book.create_sheet("Expectations")
@@ -420,27 +428,14 @@ def export_tc_excel(suite: TestSuite, path: str | Path) -> Path:
     exp_row = 2
     for case in suite.test_cases:
         for order, item in enumerate(case.expectations, start=1):
-            values = [
-                case.no_tc,
-                order,
-                item.label,
-                item.selector,
-                item.kind,
-                item.match,
-                item.expected_value,
-                item.attribute,
-                item.after_step,
-                item.tag,
-                item.sample_text,
-                item.id,
-            ]
+            values = _export_values(EXPECT_EXPORT_FIELDS, _expectation_export_row(case.no_tc, order, item))
             for col, value in enumerate(values, start=1):
                 cell = expects.cell(exp_row, col, value)
                 cell.alignment = wrap
                 cell.border = thin
                 cell.font = Font(name="Calibri", size=10)
             exp_row += 1
-    for idx, width in enumerate([14, 10, 22, 28, 12, 12, 28, 14, 12, 12, 20, 16], start=1):
+    for idx, width in enumerate([14, 8, 12, 22, 28, 12, 14, 28, 14, 14, 12, 20, 16], start=1):
         expects.column_dimensions[get_column_letter(idx)].width = width
 
     book.save(target)
@@ -452,7 +447,7 @@ def _sheet_maps(sheet) -> list[dict[str, str]]:
     mapping: dict[int, str] = {}
     for row in sheet.iter_rows(min_row=1, max_row=min(sheet.max_row or 1, 8), values_only=False):
         keys = [_header_key("" if cell.value is None else str(cell.value)) for cell in row]
-        if "no_tc" in keys or "deskripsi" in keys:
+        if "no_tc" in keys or "deskripsi" in keys or ("urutan" in keys and ("type" in keys or "kind" in keys)):
             header_row = row[0].row
             mapping = {cell.column: key for cell, key in zip(row, keys) if key}
             break
@@ -498,6 +493,7 @@ def import_tc_excel(path: str | Path) -> TestSuite:
             username=item.get("username", ""),
             password=item.get("password", ""),
             expected_result=item.get("expected_result", ""),
+            notes=item.get("notes", ""),
             enabled=_as_enabled(item.get("enabled", True)),
         )
         if not case.id:
@@ -533,6 +529,7 @@ def import_tc_excel(path: str | Path) -> TestSuite:
                             "checked": checked_val,
                             "delay_ms": delay,
                             "tag": item.get("tag", ""),
+                            "enabled": item.get("enabled", True),
                         }
                     )
                 )
@@ -561,6 +558,7 @@ def import_tc_excel(path: str | Path) -> TestSuite:
                             "after_step": item.get("after_step") or 0,
                             "tag": item.get("tag", ""),
                             "sample_text": item.get("sample_text", ""),
+                            "enabled": item.get("enabled", True),
                         }
                     )
                 )

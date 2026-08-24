@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 from typing import Any, Callable
 
-from app.core.browser_setup import apply_env, launch_browser
+from app.core.browser_setup import apply_env, launch_browser, new_browser_context
 from app.core.js_recorder import RECORDER_JS
 from app.core.models import Expectation, ExpectationResult, Step, TestCase
 from app.core.storage import screenshots_dir
@@ -71,8 +71,8 @@ def _matches(actual: str, expected: str, mode: str) -> bool:
 
 def _new_automation_context(browser, test_case: TestCase):
     if test_case.browser_storage_state:
-        return browser.new_context(no_viewport=True, storage_state=test_case.browser_storage_state)
-    context = browser.new_context(no_viewport=True)
+        return new_browser_context(browser, storage_state=test_case.browser_storage_state)
+    context = new_browser_context(browser)
     if test_case.browser_cookies:
         context.add_cookies(test_case.browser_cookies)
     return context
@@ -295,16 +295,19 @@ class AutomationEngine:
             for index, step in enumerate(test_case.steps, start=1):
                 if self._stop.is_set():
                     raise RuntimeError("Dibatalkan pengguna.")
-                self._execute_step(page, step)
+                if step.enabled:
+                    self._execute_step(page, step)
                 due = [item for item in pending if item.after_step and item.after_step <= index]
                 for expectation in due:
-                    results.append(self._check_expectation(page, test_case, expectation))
+                    if expectation.enabled:
+                        results.append(self._check_expectation(page, test_case, expectation))
                     pending.remove(expectation)
 
             for expectation in pending:
                 if self._stop.is_set():
                     raise RuntimeError("Dibatalkan pengguna.")
-                results.append(self._check_expectation(page, test_case, expectation))
+                if expectation.enabled:
+                    results.append(self._check_expectation(page, test_case, expectation))
 
             failed = [item for item in results if item.status == "NOK"]
             if failed:

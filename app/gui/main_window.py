@@ -15,26 +15,58 @@ from app import __about__, __full_name__, __version__
 from app.core.browser_setup import chromium_ready, install_chromium
 from app.core.browser_session import BrowserImportSource, fetch_cookies, fetch_storage_state, warnings_text
 from app.core.engine import MAX_RECORDED_DELAY_MS, AutomationEngine, payload_to_expectation
-from app.core.models import Expectation, ExpectationResult, Step, TestCase, TestSuite, format_delay
+from app.core.models import (
+    Expectation,
+    ExpectationResult,
+    Step,
+    EXPECT_LIST_COLUMNS,
+    STEP_LIST_COLUMNS,
+    TC_LIST_COLUMNS,
+    TestCase,
+    TestSuite,
+    format_delay,
+)
 from app.core.reporter import export_excel, export_pdf, export_tc_excel, import_tc_excel
 from app.core.storage import export_json, import_json, last_config_path, load_session, remember_config_path, reports_dir, save_session
 from app.gui.dialogs import AboutDialog, BrowserImportDialog, ExpectationDialog, StepDialog, TestCaseDialog, ask_yes_no, bind_tree_style
 from app.gui.icon import apply_window_icon, make_check_icons
 from app.gui.theme import PALETTE, apply_theme
 
-COLUMNS = (
-    ("aktif", "Active", 52),
-    ("no_tc", "NO. TC", 90),
-    ("deskripsi", "Description", 200),
-    ("aplikasi", "Aplikasi", 130),
-    ("url", "URL", 200),
-    ("username", "Username", 110),
-    ("password", "Password", 100),
-    ("expected_result", "Ekspetasi", 200),
-    ("expectation", "Expected Result", 200),
-    ("status", "Status", 80),
-    ("notes", "Notes", 220),
-)
+_TC_WIDTHS = {
+    "aktif": 52,
+    "no_tc": 90,
+    "deskripsi": 200,
+    "aplikasi": 130,
+    "url": 200,
+    "username": 110,
+    "password": 100,
+    "expected_result": 200,
+    "expectation": 200,
+    "status": 80,
+    "notes": 220,
+}
+
+_STEP_WIDTHS = {
+    "aktif": 52,
+    "no": 44,
+    "tipe": 110,
+    "ket": 260,
+    "delay": 90,
+    "selector": 170,
+    "nilai": 130,
+}
+
+_EXP_WIDTHS = {
+    "aktif": 52,
+    "no": 44,
+    "label": 170,
+    "kind": 100,
+    "match": 100,
+    "nilai": 180,
+    "after": 120,
+}
+
+COLUMNS = tuple((key, label, _TC_WIDTHS[key]) for key, label in TC_LIST_COLUMNS)
 
 TC_EDITABLE = frozenset({"no_tc", "deskripsi", "aplikasi", "url", "username", "password", "expected_result", "notes"})
 
@@ -192,24 +224,18 @@ class MainWindow(ctk.CTk):
 
         detail = ctk.CTkTabview(body, fg_color=PALETTE["surface"], segmented_button_selected_color=PALETTE["accent"], height=300)
         detail.pack(fill="x", pady=(10, 0))
-        self.tab_steps = detail.add("Langkah Terekam")
+        self.tab_steps = detail.add("Record Step")
         self.tab_exp = detail.add("Expected Result")
-        self.tab_run = detail.add("Hasil Run")
+        self.tab_run = detail.add("Test Result")
 
         self.steps_tree, steps_wrap = self._make_list_tree(
             self.tab_steps,
-            (
-                ("no", "#", 44),
-                ("tipe", "Tipe", 110),
-                ("ket", "Keterangan", 260),
-                ("delay", "Jeda", 90),
-                ("selector", "Selector", 170),
-                ("nilai", "Nilai", 130),
-            ),
+            tuple((key, label, _STEP_WIDTHS[key]) for key, label in STEP_LIST_COLUMNS),
             self._on_step_select,
             self.edit_step,
             "_checked_step_ids",
             selectmode="extended",
+            on_active_toggle=self._toggle_step_enabled,
         )
         self.steps_tree.unbind("<Double-1>")
         self.steps_tree.bind("<ButtonPress-1>", self._on_step_drag_start, add="+")
@@ -222,28 +248,24 @@ class MainWindow(ctk.CTk):
         self._bind_step_clipboard_keys()
         self._build_step_context_menu()
         step_btns = (
-            ("Ubah Langkah", self.edit_step),
-            ("Tambah Delay", self.add_delay_step),
-            ("Naik", self.move_step_up),
-            ("Turun", self.move_step_down),
-            ("Hapus Langkah", self.delete_step),
+            ("Edit Step", self.edit_step),
+            ("Add Delay", self.add_delay_step),
+            ("Move Up", self.move_step_up),
+            ("Move Down", self.move_step_down),
+            ("Delete Step", self.delete_step),
+            ("Enable", lambda: self._set_steps_enabled(True)),
+            ("Disable", lambda: self._set_steps_enabled(False)),
         )
         self._pack_list_buttons(self.tab_steps, step_btns)
 
         self.exp_tree, exp_wrap = self._make_list_tree(
             self.tab_exp,
-            (
-                ("no", "#", 44),
-                ("label", "Label", 170),
-                ("kind", "Jenis", 100),
-                ("match", "Banding", 100),
-                ("nilai", "Nilai expected", 180),
-                ("after", "Periksa setelah", 120),
-            ),
+            tuple((key, label, _EXP_WIDTHS[key]) for key, label in EXPECT_LIST_COLUMNS),
             self._on_exp_select,
             self.edit_expectation,
             "_checked_exp_ids",
             selectmode="extended",
+            on_active_toggle=self._toggle_expectation_enabled,
         )
         self.exp_tree.unbind("<Double-1>")
         self.exp_tree.configure(selectmode="extended")
@@ -254,11 +276,13 @@ class MainWindow(ctk.CTk):
         self._bind_exp_clipboard_keys()
         self._build_exp_context_menu()
         exp_btns = (
-            ("Tambah Expected", self.add_expectation),
-            ("Ubah", self.edit_expectation),
-            ("Naik", self.move_expectation_up),
-            ("Turun", self.move_expectation_down),
-            ("Hapus", self.delete_expectation),
+            ("Add Expected", self.add_expectation),
+            ("Edit Expected", self.edit_expectation),
+            ("Move Up", self.move_expectation_up),
+            ("Move Down", self.move_expectation_down),
+            ("Delete Expected", self.delete_expectation),
+            ("Enable", lambda: self._set_expectations_enabled(True)),
+            ("Disable", lambda: self._set_expectations_enabled(False)),
         )
         self._pack_list_buttons(self.tab_exp, exp_btns)
 
@@ -375,15 +399,21 @@ class MainWindow(ctk.CTk):
         has_steps = bool(self._target_steps())
         copy_state = "normal" if has_steps and can_edit else "disabled"
         paste_state = "normal" if has_clipboard and can_edit else "disabled"
+        enable_state = "normal" if has_steps and can_edit else "disabled"
         delete_state = "normal" if has_steps and can_edit else "disabled"
         self._step_context_menu.entryconfig(0, state=copy_state)
         self._step_context_menu.entryconfig(1, state=paste_state)
-        self._step_context_menu.entryconfig(3, state=delete_state)
+        self._step_context_menu.entryconfig(3, state=enable_state)
+        self._step_context_menu.entryconfig(4, state=enable_state)
+        self._step_context_menu.entryconfig(6, state=delete_state)
 
     def _build_step_context_menu(self) -> None:
         menu = tk.Menu(self, **self._menu_style())
         menu.add_command(label="Copy", command=self.copy_steps)
         menu.add_command(label="Paste", command=self.paste_steps)
+        menu.add_separator()
+        menu.add_command(label="Enable", command=lambda: self._set_steps_enabled(True))
+        menu.add_command(label="Disable", command=lambda: self._set_steps_enabled(False))
         menu.add_separator()
         menu.add_command(label="Delete", command=self.delete_step)
         self._step_context_menu = menu
@@ -446,15 +476,21 @@ class MainWindow(ctk.CTk):
         has_items = bool(self._target_expectations())
         copy_state = "normal" if has_items and can_edit else "disabled"
         paste_state = "normal" if has_clipboard and can_edit else "disabled"
+        enable_state = "normal" if has_items and can_edit else "disabled"
         delete_state = "normal" if has_items and can_edit else "disabled"
         self._exp_context_menu.entryconfig(0, state=copy_state)
         self._exp_context_menu.entryconfig(1, state=paste_state)
-        self._exp_context_menu.entryconfig(3, state=delete_state)
+        self._exp_context_menu.entryconfig(3, state=enable_state)
+        self._exp_context_menu.entryconfig(4, state=enable_state)
+        self._exp_context_menu.entryconfig(6, state=delete_state)
 
     def _build_exp_context_menu(self) -> None:
         menu = tk.Menu(self, **self._menu_style())
         menu.add_command(label="Copy", command=self.copy_expectations)
         menu.add_command(label="Paste", command=self.paste_expectations)
+        menu.add_separator()
+        menu.add_command(label="Enable", command=lambda: self._set_expectations_enabled(True))
+        menu.add_command(label="Disable", command=lambda: self._set_expectations_enabled(False))
         menu.add_separator()
         menu.add_command(label="Delete", command=self.delete_expectation)
         self._exp_context_menu = menu
@@ -539,13 +575,36 @@ class MainWindow(ctk.CTk):
         menu = tk.Menu(self, **self._menu_style())
         menu.add_command(label="Duplicate TC", command=lambda: self.duplicate_case(with_steps=False))
         menu.add_command(label="Duplicate TC + Step", command=lambda: self.duplicate_case(with_steps=True))
+        menu.add_separator()
+        menu.add_command(label="Enable", command=self.enable_selected)
+        menu.add_command(label="Disable", command=self.disable_selected)
         self._tc_context_menu = menu
+
+    def _update_tc_context_menu(self) -> None:
+        if not self._tc_context_menu:
+            return
+        can_edit = not self.engine.busy
+        has_cases = bool(self._target_cases())
+        state = "normal" if has_cases and can_edit else "disabled"
+        self._tc_context_menu.entryconfig(0, state=state)
+        self._tc_context_menu.entryconfig(1, state=state)
+        self._tc_context_menu.entryconfig(3, state=state)
+        self._tc_context_menu.entryconfig(4, state=state)
 
     def _sync_title(self) -> None:
         name = self.config_path.name if self.config_path else "untitled.json"
         self.title(f"{__full_name__}  •  v{__version__}  —  {name}")
 
-    def _make_list_tree(self, parent, columns, on_select, on_double, check_attr: str, selectmode: str = "browse") -> ttk.Treeview:
+    def _make_list_tree(
+        self,
+        parent,
+        columns,
+        on_select,
+        on_double,
+        check_attr: str,
+        selectmode: str = "browse",
+        on_active_toggle=None,
+    ) -> ttk.Treeview:
         columns = (("sel", "☐", 40),) + tuple(columns)
         wrap = tk.Frame(parent, bg=PALETTE["surface"])
         wrap.pack(side="left", fill="both", expand=True, padx=6, pady=6)
@@ -553,27 +612,44 @@ class MainWindow(ctk.CTk):
         bind_tree_style(tree)
         for key, title, width in columns:
             tree.heading(key, text=title)
-            tree.column(key, width=width, minwidth=36 if key == "sel" else 40, stretch=key != "sel", anchor="center" if key in {"sel", "no"} else "w")
+            tree.column(
+                key,
+                width=width,
+                minwidth=36 if key in {"sel", "aktif"} else 40,
+                stretch=key not in {"sel", "aktif"},
+                anchor="center" if key in {"sel", "no", "aktif"} else "w",
+            )
         tree.heading("sel", command=lambda: self._toggle_list_check_all(tree, check_attr))
         yscroll = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=yscroll.set)
         tree.pack(side="left", fill="both", expand=True)
         yscroll.pack(side="right", fill="y")
         tree.bind("<<TreeviewSelect>>", lambda _e: on_select())
-        tree.bind("<Button-1>", lambda event: self._on_list_click(event, tree, check_attr, on_select), add="+")
+        tree.bind(
+            "<Button-1>",
+            lambda event: self._on_list_click(event, tree, check_attr, on_select, on_active_toggle),
+            add="+",
+        )
         tree.bind("<Double-1>", lambda event: self._on_list_double(event, on_double))
         return tree, wrap
 
     def _checked_set(self, check_attr: str) -> set[str]:
         return getattr(self, check_attr)
 
-    def _on_list_click(self, event, tree: ttk.Treeview, check_attr: str, on_select) -> str | None:
+    def _active_icon(self, enabled: bool) -> str:
+        return "🟢" if enabled else "⚪"
+
+    def _on_list_click(self, event, tree: ttk.Treeview, check_attr: str, on_select, on_active_toggle=None) -> str | None:
         if tree.identify_region(event.x, event.y) != "cell":
             return None
-        if tree.identify_column(event.x) != "#1":
-            return None
+        column = tree.identify_column(event.x)
         row = tree.identify_row(event.y)
         if not row:
+            return None
+        if column == "#2" and on_active_toggle:
+            on_active_toggle(row)
+            return "break"
+        if column != "#1":
             return None
         checked = self._checked_set(check_attr)
         if row in checked:
@@ -842,6 +918,7 @@ class MainWindow(ctk.CTk):
         else:
             self._selected_id = iid
         self.tree.focus_set()
+        self._update_tc_context_menu()
         x_root, y_root = int(event.x_root), int(event.y_root)
         self.after(0, lambda: self._show_tc_context_menu(x_root, y_root))
         return "break"
@@ -1092,7 +1169,7 @@ class MainWindow(ctk.CTk):
                 "",
                 "end",
                 iid=step.id,
-                values=(mark, index, step.type_label(), step.summary(), delay, step.selector, nilai),
+                values=(mark, self._active_icon(step.enabled), index, step.type_label(), step.summary(), delay, step.selector, nilai),
                 tags=("odd" if index % 2 else "even",),
             )
         for index, item in enumerate(case.expectations, start=1):
@@ -1102,7 +1179,16 @@ class MainWindow(ctk.CTk):
                 "",
                 "end",
                 iid=item.id,
-                values=(mark, index, item.label or item.selector, item.kind, item.match, item.expected_value, after),
+                values=(
+                    mark,
+                    self._active_icon(item.enabled),
+                    index,
+                    item.label or item.selector,
+                    item.kind,
+                    item.match,
+                    item.expected_value,
+                    after,
+                ),
                 tags=("odd" if index % 2 else "even",),
             )
         if step_keep:
@@ -1199,6 +1285,60 @@ class MainWindow(ctk.CTk):
             self._set_status(f"{label}: {clones[0].no_tc}{extra}")
         else:
             self._set_status(f"{label}: {len(clones)} test case diduplikasi.")
+
+    def _toggle_step_enabled(self, step_id: str) -> None:
+        if self.engine.busy:
+            return
+        case = self._selected_case()
+        if not case:
+            return
+        step = next((item for item in case.steps if item.id == step_id), None)
+        if not step:
+            return
+        step.enabled = not step.enabled
+        self._refresh_details()
+        state = "ENABLE" if step.enabled else "DISABLE"
+        self._set_status(f"{state} step: {step.summary()}")
+
+    def _toggle_expectation_enabled(self, exp_id: str) -> None:
+        if self.engine.busy:
+            return
+        case = self._selected_case()
+        if not case:
+            return
+        item = next((entry for entry in case.expectations if entry.id == exp_id), None)
+        if not item:
+            return
+        item.enabled = not item.enabled
+        self._refresh_details()
+        state = "ENABLE" if item.enabled else "DISABLE"
+        self._set_status(f"{state} expected: {item.summary()}")
+
+    def _set_steps_enabled(self, enabled: bool) -> None:
+        if not self._can_edit_lists():
+            return
+        targets = self._target_steps()
+        if not targets:
+            messagebox.showinfo("JAQA", "Select or check steps first.")
+            return
+        for _case, _index, step in targets:
+            step.enabled = enabled
+        label = "ENABLE" if enabled else "DISABLE"
+        self._refresh_details()
+        self._set_status(f"{label}: {len(targets)} step(s)")
+
+    def _set_expectations_enabled(self, enabled: bool) -> None:
+        if not self._can_edit_lists():
+            return
+        targets = self._target_expectations()
+        if not targets:
+            messagebox.showinfo("JAQA", "Select or check expected results first.")
+            return
+        for _case, _index, item in targets:
+            item.enabled = enabled
+        label = "ENABLE" if enabled else "DISABLE"
+        self._refresh_details()
+        self._set_status(f"{label}: {len(targets)} expected result(s)")
 
     def _can_edit_lists(self) -> bool:
         if self.engine.busy:

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from app.core.browser_setup import apply_env
+from app.core.browser_setup import apply_env, BROWSER_ARGS, CONTEXT_KWARGS, new_browser_context
 from app.core.chrome_cookies import _read_locked_file_windows, read_chrome_cookies
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
@@ -94,7 +94,7 @@ def launch_chrome_with_cdp(
     if chrome is None:
         raise FileNotFoundError("chrome.exe tidak ditemukan. Install Google Chrome terlebih dahulu.")
 
-    args = [
+    profile_args = [
         str(chrome),
         f"--remote-debugging-port={port}",
         f"--user-data-dir={user_data}",
@@ -102,6 +102,7 @@ def launch_chrome_with_cdp(
         "--no-first-run",
         "--no-default-browser-check",
     ]
+    args = profile_args + [flag for flag in BROWSER_ARGS if flag not in {"--start-maximized"}]
     subprocess.Popen(
         args,
         stdout=subprocess.DEVNULL,
@@ -286,9 +287,10 @@ def _extract_from_profile(user_data: Path, profile_name: str, *, cookies_only: b
                     kwargs: dict[str, Any] = {
                         "user_data_dir": str(user_data),
                         "headless": True,
+                        "ignore_https_errors": True,
                         "args": [
                             f"--profile-directory={profile_name}",
-                            "--disable-dev-shm-usage",
+                            *BROWSER_ARGS,
                             "--no-first-run",
                             "--no-default-browser-check",
                         ],
@@ -424,7 +426,7 @@ def fetch_storage_state_from_profile(profile_path: str | Path) -> tuple[dict[str
 def _pick_context(browser) -> Any:
     if browser.contexts:
         return browser.contexts[0]
-    return browser.new_context()
+    return new_browser_context(browser)
 
 
 def fetch_cookies_from_browser(cdp_url: str = DEFAULT_CDP_URL) -> list[dict[str, Any]]:

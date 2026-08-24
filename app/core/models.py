@@ -55,6 +55,86 @@ STEP_TYPE_LABELS = {
     "wait": "Delay / Tunggu",
 }
 
+TC_LIST_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("aktif", "Active"),
+    ("no_tc", "NO. TC"),
+    ("deskripsi", "Description"),
+    ("aplikasi", "Application"),
+    ("url", "URL"),
+    ("username", "Username"),
+    ("password", "Password"),
+    ("expected_result", "Expectation"),
+    ("expectation", "Expected Result"),
+    ("status", "Status"),
+    ("notes", "Notes"),
+)
+
+TC_FIELD_LABELS = {key: label for key, label in TC_LIST_COLUMNS}
+
+TC_FILE_FIELDS = (
+    "aktif",
+    "no_tc",
+    "deskripsi",
+    "aplikasi",
+    "url",
+    "username",
+    "password",
+    "expected_result",
+    "notes",
+)
+
+STEP_LIST_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("aktif", "Active"),
+    ("no", "#"),
+    ("tipe", "Type"),
+    ("ket", "Step"),
+    ("delay", "Delay"),
+    ("selector", "Selector"),
+    ("nilai", "Value"),
+)
+
+STEP_EXPORT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("no_tc", "NO. TC"),
+    ("urutan", "#"),
+    ("enabled", "Active"),
+    ("type", "Type"),
+    ("label", "Step"),
+    ("selector", "Selector"),
+    ("value", "Value"),
+    ("url", "URL"),
+    ("key", "Key"),
+    ("checked", "Checked"),
+    ("delay_ms", "Delay"),
+    ("tag", "Tag"),
+    ("id", "ID"),
+)
+
+EXPECT_LIST_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("aktif", "Active"),
+    ("no", "#"),
+    ("label", "Label"),
+    ("kind", "Type"),
+    ("match", "Comparison"),
+    ("nilai", "Expected Value"),
+    ("after", "Check After"),
+)
+
+EXPECT_EXPORT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("no_tc", "NO. TC"),
+    ("urutan", "#"),
+    ("enabled", "Active"),
+    ("label", "Label"),
+    ("selector", "Selector"),
+    ("kind", "Type"),
+    ("match", "Comparison"),
+    ("expected_value", "Expected Value"),
+    ("attribute", "Attribute"),
+    ("after_step", "Check After"),
+    ("tag", "Tag"),
+    ("sample_text", "Sample"),
+    ("id", "ID"),
+)
+
 
 @dataclass
 class Step:
@@ -69,6 +149,7 @@ class Step:
     label: str = ""
     delay_ms: int = 0
     timestamp: str = field(default_factory=_now_iso)
+    enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -83,6 +164,7 @@ class Step:
             "label": self.label,
             "delay_ms": self.delay_ms,
             "timestamp": self.timestamp,
+            "enabled": self.enabled,
         }
 
     @classmethod
@@ -102,6 +184,7 @@ class Step:
             label=data.get("label", ""),
             delay_ms=max(0, int(delay or 0)),
             timestamp=data.get("timestamp", _now_iso()),
+            enabled=_as_enabled(data.get("enabled", True)),
         )
 
     def type_label(self) -> str:
@@ -143,6 +226,7 @@ class Expectation:
     after_step: int = 0
     tag: str = ""
     sample_text: str = ""
+    enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -156,6 +240,7 @@ class Expectation:
             "after_step": self.after_step,
             "tag": self.tag,
             "sample_text": self.sample_text,
+            "enabled": self.enabled,
         }
 
     @classmethod
@@ -171,6 +256,7 @@ class Expectation:
             after_step=int(data.get("after_step") or 0),
             tag=data.get("tag", ""),
             sample_text=data.get("sample_text", ""),
+            enabled=_as_enabled(data.get("enabled", True)),
         )
 
     def summary(self) -> str:
